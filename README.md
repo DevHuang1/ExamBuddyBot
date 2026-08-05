@@ -22,6 +22,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 | `/resetkey` | Go back to the preconfigured key |
 | `/model <name>` | Set your own text model (optional) |
 | `/sources` | List your uploaded sources |
+| `/rethink` | Re-answer your last question |
 | `/clear` | Delete your sources and conversation memory |
 
 ## Local Setup

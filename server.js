@@ -73,12 +73,14 @@ const HELP_TEXT =
   '/resetkey – go back to the preconfigured key\n' +
   '/model &lt;name&gt; – set your own text model (optional)\n' +
   '/sources – list your uploaded sources\n' +
+  '/rethink – re-answer your last question\n' +
   '/clear – delete your sources and conversation memory\n' +
   '/help – this message';
 
 const sources = new Map(); // chatId -> { pdfs: [{name,text,pages}], images: [{name,base64,mime}] }
 const albums = new Map();  // mediaGroupId -> { chatId, photos: [{base64,mime}], timer }
 const histories = new Map(); // chatId -> [{ role: 'user'|'assistant', content }]
+const lastQuestions = new Map(); // chatId -> last text question
 const MAX_HISTORY = 10;
 let userKeys = {};         // chatId -> { groqKey, model }
 
@@ -314,11 +316,12 @@ function escapeHtml(s) {
 
 // ---------- handlers ----------
 
-async function handleText(chatId, text) {
+async function handleText(chatId, text, { record = true } = {}) {
   const store = sources.get(chatId) || { pdfs: [], images: [] };
   const usablePdfs = store.pdfs;
   const usableImages = store.images;
 
+  lastQuestions.set(chatId, text);
   await typing(chatId);
 
   if (usablePdfs.length || usableImages.length) {
@@ -335,8 +338,10 @@ async function handleText(chatId, text) {
       `\n\nQuestion: ${text}`,
     ].join('');
     const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
-    pushHistory(chatId, 'user', text);
-    pushHistory(chatId, 'assistant', answer);
+    if (record) {
+      pushHistory(chatId, 'user', text);
+      pushHistory(chatId, 'assistant', answer);
+    }
     const link = await findRelatedLink(text);
     const linkLine = link ? `\n\n🔗 Similar answers: ${link}` : '';
     await send(chatId, `📚 Answered from ${usablePdfs.length + usableImages.length} source(s)\n\n${escapeHtml(answer)}${linkLine}`);
@@ -345,8 +350,10 @@ async function handleText(chatId, text) {
     const webContext = await webSearch(text);
     const prompt = `${webContext}\n\nQuestion: ${text}`;
     const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
-    pushHistory(chatId, 'user', text);
-    pushHistory(chatId, 'assistant', answer);
+    if (record) {
+      pushHistory(chatId, 'user', text);
+      pushHistory(chatId, 'assistant', answer);
+    }
     await send(chatId, `🌐 Web answer (no sources uploaded)\n\n${escapeHtml(answer)}`);
   }
 }
@@ -507,7 +514,18 @@ async function handleUpdate(update) {
   if (cmd === '/clear') {
     sources.delete(chatId);
     histories.delete(chatId);
+    lastQuestions.delete(chatId);
     return send(chatId, 'All sources and conversation memory cleared.');
+  }
+  if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry') {
+    const q = lastQuestions.get(chatId);
+    if (!q) return send(chatId, 'No previous question to rethink. Ask me something first.');
+    try {
+      await handleText(chatId, q, { record: false });
+    } catch (err) {
+      await send(chatId, `⚠️ Error: ${escapeHtml(err.message)}`).catch(() => {});
+    }
+    return;
   }
   if (text && !text.startsWith('/')) {
     try {
