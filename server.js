@@ -13,6 +13,14 @@ const TEXT_MODEL = process.env.TEXT_MODEL || 'llama-3.3-70b-versatile';
 const VISION_MODEL = process.env.VISION_MODEL || 'llama-3.2-90b-vision-preview';
 const MAX_SOURCE_CHARS = parseInt(process.env.MAX_SOURCE_CHARS || '20000', 10);
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
+
+function renderPage(pageData) {
+  return pageData.getTextContent().then((text) => {
+    const pageText = text.items.map((item) => item.str).join(' ');
+    return `[Page ${pageData.pageNumber}] ${pageText}`;
+  });
+}
 
 const DATA_DIR = path.join(__dirname, 'data');
 const KEYS_FILE = resolveKeysFile();
@@ -58,18 +66,32 @@ const HELP_TEXT =
   '📚 <b>ExamBuddy Bot</b>\n\n' +
   '• <b>Forward an image</b> (question paper, homework, notes) – I read it and answer directly.\n' +
   '• <b>Send a PDF</b> – saved as a lecture source for questions.\n' +
-  '• <b>Send a text question</b> – answered from your sources, or from the web.\n\n' +
+  '• <b>Send a text question</b> – answered from your sources, or from the web.\n' +
+  '• <b>Remembers your recent Q&amp;A</b> – follow-up questions have context.\n\n' +
   'Commands:\n' +
   '/apikey &lt;key&gt; – set your own Groq API key\n' +
   '/resetkey – go back to the preconfigured key\n' +
   '/model &lt;name&gt; – set your own text model (optional)\n' +
   '/sources – list your uploaded sources\n' +
-  '/clear – delete your sources\n' +
+  '/clear – delete your sources and conversation memory\n' +
   '/help – this message';
 
-const sources = new Map(); // chatId -> { pdfs: [{name,text}], images: [{name,base64,mime}] }
+const sources = new Map(); // chatId -> { pdfs: [{name,text,pages}], images: [{name,base64,mime}] }
 const albums = new Map();  // mediaGroupId -> { chatId, photos: [{base64,mime}], timer }
+const histories = new Map(); // chatId -> [{ role: 'user'|'assistant', content }]
+const MAX_HISTORY = 10;
 let userKeys = {};         // chatId -> { groqKey, model }
+
+function getHistory(chatId) {
+  return histories.get(chatId) || [];
+}
+
+function pushHistory(chatId, role, content) {
+  const h = histories.get(chatId) || [];
+  h.push({ role, content });
+  if (h.length > MAX_HISTORY) h.splice(0, h.length - MAX_HISTORY);
+  histories.set(chatId, h);
+}
 
 function loadKeys() {
   try {
@@ -147,7 +169,7 @@ function getGroqKey(chatId) {
   return null;
 }
 
-async function groqChat({ chatId, model, systemPrompt, userText, images }) {
+async function groqChat({ chatId, model, systemPrompt, userText, images, history }) {
   const keyInfo = getGroqKey(chatId);
   if (!keyInfo) {
     throw new Error(
@@ -158,9 +180,14 @@ async function groqChat({ chatId, model, systemPrompt, userText, images }) {
   for (const img of images || []) {
     content.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.base64}` } });
   }
+  const messages = [{ role: 'system', content: systemPrompt }];
+  for (const h of history || []) {
+    if (h.role === 'user' || h.role === 'assistant') messages.push({ role: h.role, content: h.content });
+  }
+  messages.push({ role: 'user', content });
   const body = JSON.stringify({
     model,
-    messages: [{ role: 'user', content }],
+    messages,
     temperature: 0.4,
     max_completion_tokens: 2048,
   });
@@ -216,6 +243,24 @@ async function firecrawlSearch(query) {
   return pieces.join('\n\n');
 }
 
+async function findRelatedLink(question) {
+  try {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(question)}`;
+    const res = await fetch(url, { headers: { 'User-Agent': UA } });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const m = html.match(/<a[^>]*class="result__a"[^>]*href="([^"]+)"/);
+    if (!m) return null;
+    let link = m[1];
+    if (link.startsWith('//')) link = `https:${link}`;
+    const uddg = link.match(/uddg=([^&]+)/);
+    if (uddg) link = decodeURIComponent(uddg[1]);
+    return link || null;
+  } catch {
+    return null;
+  }
+}
+
 async function webSearch(query) {
   if (FIRECRAWL_API_KEY) return firecrawlSearch(query);
   if (TAVILY_API_KEY) {
@@ -234,7 +279,7 @@ async function webSearch(query) {
   }
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   const res = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36' },
+    headers: { 'User-Agent': UA },
   });
   if (!res.ok) throw new Error('Web search failed.');
   const html = await res.text();
@@ -279,22 +324,29 @@ async function handleText(chatId, text) {
   if (usablePdfs.length || usableImages.length) {
     const context = truncate(
       usablePdfs
-        .map((s, i) => `<source ${i + 1}> PDF "${s.name}"\n${truncate(s.text)}\n</source ${i + 1}>`)
+        .map((s, i) => `<source ${i + 1}> PDF "${s.name}" (${s.pages} pages)\n${truncate(s.text)}\n</source ${i + 1}>`)
         .join('\n\n'),
       MAX_SOURCE_CHARS,
     );
     const prompt = [
       SYSTEM_PROMPT,
+      '\nWhen you answer from the sources, cite the PDF number and page number (e.g. "PDF 1, page 3").',
       `\n\nUploaded lecture sources:\n${context}`,
       `\n\nQuestion: ${text}`,
     ].join('');
-    const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt });
-    await send(chatId, `📚 Answered from ${usablePdfs.length + usableImages.length} source(s)\n\n${escapeHtml(answer)}`);
+    const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
+    pushHistory(chatId, 'user', text);
+    pushHistory(chatId, 'assistant', answer);
+    const link = await findRelatedLink(text);
+    const linkLine = link ? `\n\n🔗 Similar answers: ${link}` : '';
+    await send(chatId, `📚 Answered from ${usablePdfs.length + usableImages.length} source(s)\n\n${escapeHtml(answer)}${linkLine}`);
   } else {
     await send(chatId, '🔎 No sources yet – searching the web…');
     const webContext = await webSearch(text);
     const prompt = `${webContext}\n\nQuestion: ${text}`;
-    const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt });
+    const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
+    pushHistory(chatId, 'user', text);
+    pushHistory(chatId, 'assistant', answer);
     await send(chatId, `🌐 Web answer (no sources uploaded)\n\n${escapeHtml(answer)}`);
   }
 }
@@ -364,9 +416,9 @@ async function handleDocument(chatId, doc) {
     if (isPdf) {
       const tmp = path.join(os.tmpdir(), `exambuddy_${Date.now()}.pdf`);
       fs.writeFileSync(tmp, buf);
-      const parsed = await pdfParse(fs.readFileSync(tmp));
+      const parsed = await pdfParse(fs.readFileSync(tmp), { pagerender: renderPage });
       fs.unlinkSync(tmp);
-      store.pdfs.push({ name, text: parsed.text });
+      store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages });
       sources.set(chatId, store);
       await send(chatId, `📄 Added "${escapeHtml(name)}" as PDF source (${store.pdfs.length} PDF source(s)). Ask me a question now.`);
     } else {
@@ -454,7 +506,8 @@ async function handleUpdate(update) {
   }
   if (cmd === '/clear') {
     sources.delete(chatId);
-    return send(chatId, 'All sources cleared.');
+    histories.delete(chatId);
+    return send(chatId, 'All sources and conversation memory cleared.');
   }
   if (text && !text.startsWith('/')) {
     try {
