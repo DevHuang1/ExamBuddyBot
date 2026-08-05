@@ -1,6 +1,6 @@
 # ExamBuddyBot
 
-Telegram bot that answers exam questions from forwarded images, uploaded sources (PDFs/images), or web search. Uses Groq (Llama-3.3-70B for text, Llama-3.2-90B for vision).
+Telegram bot that answers exam questions from forwarded images, uploaded sources (PDFs/images), or web search. Uses Groq (Llama-3.3-70B for text, Qwen 3.6 27B for vision).
 
 ## Features
 
