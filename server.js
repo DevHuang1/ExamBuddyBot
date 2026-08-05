@@ -140,6 +140,9 @@ function loadSources() {
       for (const [chatId, store] of Object.entries(parsed)) {
         sources.set(Number(chatId), store);
       }
+      console.log(`Loaded sources from ${SOURCES_FILE}: ${Object.keys(parsed).length} chat(s) with sources.`);
+    } else {
+      console.log(`No sources file at ${SOURCES_FILE} yet — starting fresh.`);
     }
   } catch (err) {
     console.error('Could not load sources file:', err.message);
@@ -153,6 +156,7 @@ function saveSources() {
     const obj = {};
     for (const [chatId, store] of sources) obj[chatId] = store;
     fs.writeFileSync(SOURCES_FILE, JSON.stringify(obj), { mode: 0o600 });
+    console.log(`Saved sources to ${SOURCES_FILE}: ${Object.keys(obj).length} chat(s).`);
   } catch (err) {
     console.error('Could not save sources file:', err.message);
   }
@@ -521,24 +525,37 @@ async function handleText(chatId, text, { record = true } = {}) {
 
   if (usablePdfs.length || usableImages.length) {
     const context = buildContext(usablePdfs, text, MAX_SOURCE_CHARS);
+    const images = usableImages.slice(0, 4);
+    const sourceCount = usablePdfs.length + usableImages.length;
     const prompt = [
       SYSTEM_PROMPT,
       '\nWhen you answer from the sources, cite the source number and the page/slide number (e.g. "PDF 1, page 3" or "Slides 2, slide 5").',
       maybeDiagram(text) ? DIAGRAM_HINT : '',
-      `\n\nUploaded lecture sources:\n${context}`,
+      context ? `\n\nUploaded lecture sources:\n${context}` : '',
+      images.length ? `\n\n${images.length} uploaded image source(s) are attached — read them and use them to answer.` : '',
       `\n\nQuestion: ${text}`,
     ].filter(Boolean).join('');
-    const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
+    if (usablePdfs.length && !context && !images.length) {
+      console.error(`No usable text extracted from PDF sources for chat ${chatId} (question: "${text.slice(0, 60)}")`);
+    }
+    const answer = await groqChat({
+      chatId,
+      model: images.length ? VISION_MODEL : (userKeys[chatId]?.model || TEXT_MODEL),
+      systemPrompt: SYSTEM_PROMPT,
+      userText: prompt,
+      images,
+      history: getHistory(chatId),
+    });
     if (record) {
       pushHistory(chatId, 'user', text);
       pushHistory(chatId, 'assistant', stripDotBlock(answer));
     }
-    await sendLong(chatId, `📚 Answered from ${usablePdfs.length + usableImages.length} source(s)\n\n`, stripDotBlock(answer));
+    await sendLong(chatId, `📚 Answered from ${sourceCount} source(s)\n\n`, stripDotBlock(answer));
     await extractAndSendDiagram(chatId, answer);
     const link = await findRelatedLink(text);
     if (link) await send(chatId, `🔗 Similar answers: ${link}`);
   } else {
-    await send(chatId, '🔎 No sources yet – searching the web…');
+    await send(chatId, '🔎 No sources found for this chat yet – searching the web…\n(Send a PDF/PPTX or an image to add a source; check /sources.)');
     const webContext = await webSearch(text);
     const prompt = `${webContext}\n\n${maybeDiagram(text) ? DIAGRAM_HINT + '\n' : ''}Question: ${text}`;
     const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
@@ -620,6 +637,9 @@ async function handleDocument(chatId, doc) {
       fs.writeFileSync(tmp, buf);
       const parsed = await pdfParse(fs.readFileSync(tmp), { pagerender: renderPage });
       fs.unlinkSync(tmp);
+      if (!parsed.text || !parsed.text.trim()) {
+        throw new Error('No readable text found in that PDF (it may be a scanned or image-only PDF). Try sending the pages as photos instead.');
+      }
       store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages, type: 'pdf' });
       sources.set(chatId, store);
       saveSources();
