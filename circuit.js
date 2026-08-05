@@ -295,7 +295,8 @@ function pinPort(i, n) {
   return ['nw', 'w', 'sw', 'w'][i % 4];
 }
 
-function buildDotGraph(spec) {
+function buildDotGraph(spec, opts) {
+  opts = opts || {};
   const inputs = Array.isArray(spec.inputs) ? spec.inputs : [];
   const outputs = Array.isArray(spec.outputs) ? spec.outputs : [];
   const gates = Array.isArray(spec.gates) ? spec.gates : [];
@@ -331,7 +332,7 @@ function buildDotGraph(spec) {
     }
   }
   for (const [s, list] of sinks) {
-    if (list.length > 1 && (inputs.includes(s) || producer[s])) juncToken.set(String(s), `j${juncToken.size}`);
+    if (!opts.noJunctions && list.length > 1 && (inputs.includes(s) || producer[s])) juncToken.set(String(s), `j${juncToken.size}`);
   }
 
   // Balanced stage column: max(longest path from inputs, longest path to outputs).
@@ -377,7 +378,7 @@ function buildDotGraph(spec) {
 
   const lines = [];
   lines.push('digraph G {');
-  lines.push('  graph [splines=spline, splineorder=true, rankdir=LR, nodesep=0.35, ranksep=0.8, pad=0.3];');
+  lines.push(`  graph [splines=${opts.splines || 'spline'}, splineorder=true, rankdir=LR, nodesep=0.35, ranksep=0.8, pad=0.3];`);
   lines.push(`  node [shape=box, style=solid, fixedsize=true, width=${(GATE_W / 72).toFixed(5)}, height=${(GATE_H / 72).toFixed(5)}, label=""];`);
   for (const g of gates) lines.push(`  ${gateNodeOf(g)};`);
   for (const list of colGroups.values()) {
@@ -397,6 +398,7 @@ function buildDotGraph(spec) {
     const n = (g.inputs || []).length;
     (g.inputs || []).forEach((s, i) => {
       const key = String(s);
+      if (!inputs.includes(s) && !producer[s]) return;
       const jt = juncToken.get(key);
       if (jt) {
         const fromNode = sigNodeOf(s);
@@ -584,6 +586,151 @@ async function renderGraphviz(spec) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Manhattan (orthogonal) router.
+ *
+ * Gate placement comes from Graphviz (balanced rank columns). Wiring is done
+ * here with right-angle runs only:
+ *   - each signal runs horizontally from its source to the vertical trunk
+ *     lane left of the destination column, then into each input pin;
+ *   - a "shelf" run is used when the natural horizontal run at the source's
+ *     height would pass through a gate body;
+ *   - junction dots are derived from the wire graph (points with 3+ ends).
+ * ------------------------------------------------------------------------- */
+
+const TRUNK_OFF = 16;
+
+function manhattanOutPin(m) {
+  return { x: m.left + m.w + (OUT_EXTRA[m.g.type] || 0), y: m.top + m.h / 2 };
+}
+
+function manhattanInPin(m, idx) {
+  const n = (m.g.inputs || []).length;
+  const y = n === 1 ? m.top + m.h / 2 : m.top + (m.h * (idx + 1)) / (n + 1);
+  return { x: m.left + (BACK[m.g.type] || 0), y };
+}
+
+function routeManhattan(spec, L) {
+  const wires = [];
+  const seg = (x1, y1, x2, y2, destGate) => {
+    if (x1 === x2 && y1 === y2) return;
+    wires.push({ x1, y1, x2, y2, destGate: destGate || null });
+  };
+
+  const gates = [...L.gateById.values()];
+
+  const colOf = new Map();
+  const colLeft = new Map();
+  const byLeft = new Map();
+  for (const m of gates) {
+    const k = Math.round(m.left);
+    if (!byLeft.has(k)) { byLeft.set(k, byLeft.size); colLeft.set(byLeft.size - 1, m.left); }
+    colOf.set(m.g.id, byLeft.get(k));
+  }
+  for (const m of gates) {
+    const c = colOf.get(m.g.id);
+    colLeft.set(c, Math.min(colLeft.get(c), m.left));
+  }
+
+  const srcPoint = new Map();
+  let inputX = Infinity;
+  for (const p of L.inputs.values()) inputX = Math.min(inputX, p.x);
+  const minGateLeft = Math.min(...gates.map((g) => g.left));
+  inputX = Math.max(Math.min(inputX, minGateLeft - 44), 8);
+  for (const p of L.inputs.values()) p.x = inputX;
+  for (const [s, p] of L.inputs) srcPoint.set(String(s), { x: p.x, y: p.y });
+  for (const m of gates) srcPoint.set(m.g.output, manhattanOutPin(m));
+
+  const dests = new Map();
+  for (const m of gates) {
+    const n = (m.g.inputs || []).length;
+    (m.g.inputs || []).forEach((sig, i) => {
+      const key = String(sig);
+      if (!srcPoint.has(key)) return;
+      const p = manhattanInPin(m, i);
+      const tx = colLeft.get(colOf.get(m.g.id)) - TRUNK_OFF;
+      if (!dests.has(key)) dests.set(key, []);
+      dests.get(key).push({ tx, dx: p.x, dy: p.y, gateId: m.g.id });
+    });
+  }
+
+  let rightmost = 0;
+  for (const m of gates) rightmost = Math.max(rightmost, manhattanOutPin(m).x);
+  const outLineX = rightmost + 28;
+  const outLabelY = new Map();
+  for (const o of spec.outputs || []) {
+    const prod = producerOf(spec, o);
+    if (!prod) continue;
+    const src = srcPoint.get(prod.output);
+    if (!src) continue;
+    outLabelY.set(String(o), src.y);
+    if (!dests.has(String(o))) dests.set(String(o), []);
+    dests.get(String(o)).push({ tx: outLineX, dx: outLineX, dy: src.y, gateId: null });
+  }
+
+  for (const [sig, list] of dests) {
+    const src = srcPoint.get(sig);
+    if (!src) continue;
+
+    const xs = [src.x, ...list.map((d) => d.tx)];
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    let H = src.y;
+    const CLEAR = 5;
+    const inRange = gates.filter((g) => g.left < maxX && g.left + g.w > minX);
+    if (inRange.some((g) => src.y >= g.top - CLEAR && src.y <= g.top + g.h + CLEAR)) {
+      const topMin = Math.min(...inRange.map((g) => g.top));
+      const botMax = Math.max(...inRange.map((g) => g.top + g.h));
+      const above = topMin - (CLEAR + 11);
+      const below = botMax + (CLEAR + 11);
+      H = Math.abs(above - src.y) <= Math.abs(below - src.y) ? above : below;
+    }
+
+    if (H !== src.y) seg(src.x, src.y, src.x, H, null);
+
+    const sortedXs = [...new Set(xs)].sort((a, b) => a - b);
+    for (let i = 0; i + 1 < sortedXs.length; i++) seg(sortedXs[i], H, sortedXs[i + 1], H, null);
+
+    const groups = new Map();
+    for (const d of list) {
+      if (!groups.has(d.tx)) groups.set(d.tx, []);
+      groups.get(d.tx).push(d);
+    }
+    for (const [tx, gl] of groups) {
+      const ys = [H, ...gl.map((d) => d.dy)];
+      const sortedYs = [...new Set(ys)].sort((a, b) => a - b);
+      for (let i = 0; i + 1 < sortedYs.length; i++) seg(tx, sortedYs[i], tx, sortedYs[i + 1], null);
+      for (const d of gl) seg(tx, d.dy, d.dx, d.dy, d.gateId);
+    }
+  }
+
+  const pins = new Set();
+  for (const m of gates) {
+    const n = (m.g.inputs || []).length;
+    pins.add(`${round(manhattanOutPin(m).x)},${round(manhattanOutPin(m).y)}`);
+    for (let i = 0; i < n; i++) {
+      const p = manhattanInPin(m, i);
+      pins.add(`${round(p.x)},${round(p.y)}`);
+    }
+  }
+  const count = new Map();
+  for (const w of wires) {
+    const a = `${round(w.x1)},${round(w.y1)}`;
+    const b = `${round(w.x2)},${round(w.y2)}`;
+    count.set(a, (count.get(a) || 0) + 1);
+    count.set(b, (count.get(b) || 0) + 1);
+  }
+  const dots = [];
+  for (const [k, n] of count) {
+    if (n >= 3 && !pins.has(k)) {
+      const [x, y] = k.split(',').map(parseFloat);
+      dots.push({ x, y });
+    }
+  }
+
+  return { wires, dots, outLineX, outLabelY };
+}
+
+/* ---------------------------------------------------------------------------
  * Geometry checks: wires must never cross gate bodies; labels must not overlap
  * gates; junction dots must sit in empty space.
  * ------------------------------------------------------------------------- */
@@ -642,14 +789,145 @@ function checkGeometry(spec, L, wires) {
   return issues;
 }
 
+/* ---------------------------------------------------------------------------
+ * Segment-based geometry check for the Manhattan router.
+ * ------------------------------------------------------------------------- */
+
+function checkSegments(spec, L, wires, dots) {
+  const issues = [];
+  const rects = [];
+  for (const m of L.gateById.values()) {
+    rects.push({ id: m.g.id, top: m.top, bottom: m.top + m.h, left: m.left, right: m.left + m.w });
+  }
+  for (const w of wires) {
+    for (const r of rects) {
+      if (w.destGate === r.id) continue;
+      if (w.y1 === w.y2) {
+        if (w.y1 > r.top && w.y1 < r.bottom && Math.min(w.x1, w.x2) < r.right && Math.max(w.x1, w.x2) > r.left) {
+          issues.push(`wire through gate ${r.id}`);
+          return issues;
+        }
+      } else if (w.x1 === w.x2) {
+        if (w.x1 > r.left && w.x1 < r.right && Math.min(w.y1, w.y2) < r.bottom && Math.max(w.y1, w.y2) > r.top) {
+          issues.push(`wire through gate ${r.id}`);
+          return issues;
+        }
+      }
+    }
+  }
+  for (const d of dots || []) {
+    for (const r of rects) {
+      if (d.x > r.left && d.x < r.right && d.y > r.top && d.y < r.bottom) {
+        issues.push(`junction dot inside gate ${r.id}`);
+        return issues;
+      }
+    }
+  }
+  return issues;
+}
+
+function manhattanSvg(spec, L, R) {
+  const outLabels = [];
+  const outByY = new Map();
+  for (const o of spec.outputs || []) {
+    const y = R.outLabelY.get(String(o));
+    if (y === undefined) continue;
+    if (!outByY.has(y)) outByY.set(y, []);
+    outByY.get(y).push(o);
+  }
+  for (const [y, names] of outByY) {
+    names.forEach((name, i) => {
+      outLabels.push({ name, y: y + (i - (names.length - 1) / 2) * 17 });
+    });
+  }
+
+  const labelW = (s) => Math.max(5, String(s).length) * 8 + 8;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const grow = (x, y) => {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  };
+  for (const m of L.gateById.values()) {
+    grow(m.left, m.top);
+    grow(m.left + m.w, m.top + m.h);
+  }
+  for (const w of R.wires) {
+    grow(w.x1, w.y1);
+    grow(w.x2, w.y2);
+  }
+  for (const d of R.dots) grow(d.x, d.y);
+  for (const [s, p] of L.inputs) {
+    const w = labelW(s);
+    grow(p.x - 8 - w, p.y);
+    grow(p.x - 8, p.y + 15);
+  }
+  for (const l of outLabels) {
+    const w = labelW(l.name);
+    grow(R.outLineX + 14, l.y);
+    grow(R.outLineX + 14 + w, l.y + 15);
+  }
+  const pad = 12;
+  minX = Math.floor(minX) - pad;
+  minY = Math.floor(minY) - pad;
+  maxX = Math.ceil(maxX) + pad;
+  maxY = Math.ceil(maxY) + pad;
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const tx = -minX;
+  const ty = -minY;
+  const P = (x, y) => `${round(x + tx)},${round(y + ty)}`;
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+  svg += '<rect width="100%" height="100%" fill="#ffffff"/>';
+  svg += `<g fill="none" stroke="#3b4252" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter">`;
+  for (const w of R.wires) svg += `M ${P(w.x1, w.y1)} L ${P(w.x2, w.y2)}`;
+  svg += '</g>';
+  if (R.dots.length) svg += `<g fill="#3b4252">${R.dots.map((d) => `<circle cx="${round(d.x + tx)}" cy="${round(d.y + ty)}" r="3"/>`).join('')}</g>`;
+  svg += '<g fill="#fffdf6" stroke="#1f2430" stroke-width="1.9" stroke-linejoin="round">';
+  for (const m of L.gateById.values()) {
+    const g = m.g;
+    svg += `<path d="${gateBody(g.type, m.left + tx, m.top + ty)}"/>`;
+    const curve = gateExtraCurve(g.type, m.left + tx, m.top + ty);
+    if (curve) svg += `<path d="${curve}" fill="none" stroke="#1f2430" stroke-width="1.9"/>`;
+    if (INVERTED.has(g.type)) {
+      svg += `<circle cx="${round(m.left + m.w + tx)}" cy="${round(m.top + m.h / 2 + ty)}" r="4.6" fill="#fffdf6"/>`;
+    }
+  }
+  svg += '</g>';
+  svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">';
+  for (const [s, p] of L.inputs) svg += `<text x="${round(p.x + tx - 8)}" y="${round(p.y + ty + 5)}" text-anchor="end" fill="#1d4ed8">${esc(s)}</text>`;
+  for (const l of outLabels) svg += `<text x="${round(R.outLineX + tx + 14)}" y="${round(l.y + ty + 5)}" text-anchor="start" fill="#15803d">${esc(l.name)}</text>`;
+  svg += '</g>';
+  svg += '</svg>';
+  return svg;
+}
+
+async function renderManhattan(spec) {
+  const built = buildDotGraph(spec, { noJunctions: true, splines: 'none' });
+  if (!built) return null;
+  const viz = await getViz();
+  const json = JSON.parse(viz.renderString(built.dot, { format: 'json' }));
+  const L = parseGraphLayout(spec, json, built);
+  if (!L) return null;
+  const R = routeManhattan(spec, L);
+  const issues = checkSegments(spec, L, R.wires, R.dots);
+  if (issues.length) {
+    console.error('Manhattan geometry issues:', issues.slice(0, 8));
+    return null;
+  }
+  return manhattanSvg(spec, L, R);
+}
+
 async function renderCircuit(spec) {
   try {
-    const svg = await renderGraphviz(spec);
+    const svg = await renderManhattan(spec);
     if (svg) return svg;
   } catch (err) {
-    console.error('Graphviz render failed, falling back:', err.message);
+    console.error('Manhattan render failed, falling back:', err.message);
   }
   return renderV2(spec);
 }
 
-module.exports = { renderCircuit, layout, layoutV2, renderV2, renderGraphviz, buildDotGraph, parseGraphLayout };
+module.exports = { renderCircuit, layout, layoutV2, renderV2, renderGraphviz, buildDotGraph, parseGraphLayout, routeManhattan, renderManhattan, checkSegments };
