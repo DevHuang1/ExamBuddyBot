@@ -7,7 +7,7 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY server.js ./
+COPY server.js circuit.js ./
 
 EXPOSE 8080
 
