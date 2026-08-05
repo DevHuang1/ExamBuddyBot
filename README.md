@@ -5,7 +5,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 ## Features
 
 - 📷 **Forward an image** (question paper, homework, notes) — read and answered directly using a vision model.
-- 📄 **Send a PDF** — saved as a lecture source for answering questions.
+- 📄 **Send a PDF or PPTX** — saved as a lecture source (with page/slide numbers) for answering questions.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo).
 - 📖 **Citations + links** — answers cite the source PDF and page number, and include a related web link.
 - 💬 **Conversation memory** — remembers your recent Q&A so follow-up questions have context.
@@ -21,7 +21,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 | `/apikey <key>` | Set your own Groq API key |
 | `/resetkey` | Go back to the preconfigured key |
 | `/model <name>` | Set your own text model (optional) |
-| `/sources` | List your uploaded sources |
+| `/sources` | List your uploaded PDF/PPTX/image sources |
 | `/rethink` | Re-answer your last question |
 | `/clear` | Delete your sources and conversation memory |
 

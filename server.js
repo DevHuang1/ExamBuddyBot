@@ -4,6 +4,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const pdfParse = require('pdf-parse');
+const JSZip = require('jszip');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || '').trim();
@@ -20,6 +21,22 @@ function renderPage(pageData) {
     const pageText = text.items.map((item) => item.str).join(' ');
     return `[Page ${pageData.pageNumber}] ${pageText}`;
   });
+}
+
+async function parsePptx(buf) {
+  const zip = await JSZip.loadAsync(buf);
+  const slideFiles = Object.keys(zip.files)
+    .filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+    .sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10));
+  const parts = [];
+  for (const f of slideFiles) {
+    const num = parseInt(f.match(/\d+/)[0], 10);
+    const xml = await zip.file(f).async('string');
+    const texts = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map((m) => m[1]).filter((t) => t.trim());
+    if (texts.length) parts.push(`[Slide ${num}] ${texts.join(' ')}`);
+  }
+  if (!parts.length) return null;
+  return { text: parts.join('\n\n'), pages: slideFiles.length };
 }
 
 const DATA_DIR = path.join(__dirname, 'data');
@@ -66,7 +83,7 @@ const VISION_PROMPT =
 const HELP_TEXT =
   '📚 <b>ExamBuddy Bot</b>\n\n' +
   '• <b>Forward an image</b> (question paper, homework, notes) – I read it and answer directly.\n' +
-  '• <b>Send a PDF</b> – saved as a lecture source for questions.\n' +
+  '• <b>Send a PDF or PPTX</b> – saved as a source (with page/slide numbers) for answering questions.\n' +
   '• <b>Send a text question</b> – answered from your sources, or from the web.\n' +
   '• <b>Remembers your recent Q&amp;A</b> – follow-up questions have context.\n\n' +
   'Commands:\n' +
@@ -373,13 +390,13 @@ async function handleText(chatId, text, { record = true } = {}) {
   if (usablePdfs.length || usableImages.length) {
     const context = truncate(
       usablePdfs
-        .map((s, i) => `<source ${i + 1}> PDF "${s.name}" (${s.pages} pages)\n${truncate(s.text)}\n</source ${i + 1}>`)
+        .map((s, i) => `<source ${i + 1}> ${s.type === 'pptx' ? 'Slides' : 'PDF'} "${s.name}" (${s.pages} ${s.type === 'pptx' ? 'slides' : 'pages'})\n${truncate(s.text)}\n</source ${i + 1}>`)
         .join('\n\n'),
       MAX_SOURCE_CHARS,
     );
     const prompt = [
       SYSTEM_PROMPT,
-      '\nWhen you answer from the sources, cite the PDF number and page number (e.g. "PDF 1, page 3").',
+      '\nWhen you answer from the sources, cite the source number and the page/slide number (e.g. "PDF 1, page 3" or "Slides 2, slide 5").',
       `\n\nUploaded lecture sources:\n${context}`,
       `\n\nQuestion: ${text}`,
     ].join('');
@@ -464,17 +481,28 @@ async function handleDocument(chatId, doc) {
   try {
     const buf = await downloadFile(doc.file_id);
     const name = doc.file_name || `doc_${Date.now()}`;
-    const isPdf = (doc.mime_type === 'application/pdf') || name.toLowerCase().endsWith('.pdf');
+    const lower = name.toLowerCase();
+    const isPdf = (doc.mime_type === 'application/pdf') || lower.endsWith('.pdf');
+    const isPptx = (doc.mime_type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') || lower.endsWith('.pptx');
     const store = sources.get(chatId) || { pdfs: [], images: [] };
     if (isPdf) {
       const tmp = path.join(os.tmpdir(), `exambuddy_${Date.now()}.pdf`);
       fs.writeFileSync(tmp, buf);
       const parsed = await pdfParse(fs.readFileSync(tmp), { pagerender: renderPage });
       fs.unlinkSync(tmp);
-      store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages });
+      store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages, type: 'pdf' });
       sources.set(chatId, store);
       saveSources();
       await send(chatId, `📄 Added "${escapeHtml(name)}" as PDF source (${store.pdfs.length} PDF source(s)). Ask me a question now.`);
+    } else if (isPptx) {
+      const parsed = await parsePptx(buf);
+      if (!parsed || !parsed.text.trim()) {
+        throw new Error('No readable text found in that PPTX (it may be image-only slides).');
+      }
+      store.pdfs.push({ name, text: parsed.text, pages: parsed.pages, type: 'pptx' });
+      sources.set(chatId, store);
+      saveSources();
+      await send(chatId, `📊 Added "${escapeHtml(name)}" as slides source (${store.pdfs.length} source(s), ${parsed.pages} slides). Ask me a question now.`);
     } else {
       const mime = doc.mime_type || 'image/jpeg';
       store.images.push({ name, base64: buf.toString('base64'), mime });
@@ -555,7 +583,7 @@ async function handleUpdate(update) {
   if (cmd === '/sources') {
     const store = sources.get(chatId) || { pdfs: [], images: [] };
     const lines = [];
-    store.pdfs.forEach((s, i) => lines.push(`PDF ${i + 1}: ${s.name}`));
+    store.pdfs.forEach((s, i) => lines.push(`${s.type === 'pptx' ? 'Slides' : 'PDF'} ${i + 1}: ${s.name}`));
     store.images.forEach((s, i) => lines.push(`Image ${i + 1}: ${s.name}`));
     return send(chatId, lines.length ? `Your sources:\n${lines.map(escapeHtml).join('\n')}` : 'No sources yet. Send a PDF or photo.');
   }
