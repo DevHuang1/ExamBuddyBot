@@ -10,6 +10,7 @@ const GROQ_API_KEY = (process.env.GROQ_API_KEY || '').trim();
 const TAVILY_API_KEY = (process.env.TAVILY_API_KEY || '').trim();
 const TEXT_MODEL = process.env.TEXT_MODEL || 'llama-3.3-70b-versatile';
 const VISION_MODEL = process.env.VISION_MODEL || 'llama-3.2-90b-vision-preview';
+const MAX_SOURCE_CHARS = parseInt(process.env.MAX_SOURCE_CHARS || '20000', 10);
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 const DATA_DIR = path.join(__dirname, 'data');
@@ -156,24 +157,36 @@ async function groqChat({ chatId, model, systemPrompt, userText, images }) {
   for (const img of images || []) {
     content.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.base64}` } });
   }
-  const res = await fetch(GROQ_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${keyInfo.key}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'user', content }],
-      temperature: 0.4,
-      max_completion_tokens: 2048,
-    }),
+  const body = JSON.stringify({
+    model,
+    messages: [{ role: 'user', content }],
+    temperature: 0.4,
+    max_completion_tokens: 2048,
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || `Groq error (HTTP ${res.status})`);
-  const answer = data.choices?.[0]?.message?.content?.trim();
-  if (!answer) throw new Error('Groq returned an empty answer.');
-  return answer;
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(GROQ_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${keyInfo.key}`,
+      },
+      body,
+    });
+    const data = await res.json();
+    if (res.ok) {
+      const answer = data.choices?.[0]?.message?.content?.trim();
+      if (!answer) throw new Error('Groq returned an empty answer.');
+      return answer;
+    }
+    const msg = data.error?.message || `Groq error (HTTP ${res.status})`;
+    const transient = res.status === 429 || /rate limit|tokens? per minute|TPM|RPM/i.test(msg);
+    if (transient && attempt < 3) {
+      await delay(attempt * 30000);
+      continue;
+    }
+    throw new Error(msg);
+  }
 }
 
 async function webSearch(query) {
@@ -221,9 +234,12 @@ async function handleText(chatId, text) {
   await typing(chatId);
 
   if (usablePdfs.length || usableImages.length) {
-    const context = usablePdfs
-      .map((s, i) => `<source ${i + 1}> PDF "${s.name}"\n${truncate(s.text)}\n</source ${i + 1}>`)
-      .join('\n\n');
+    const context = truncate(
+      usablePdfs
+        .map((s, i) => `<source ${i + 1}> PDF "${s.name}"\n${truncate(s.text)}\n</source ${i + 1}>`)
+        .join('\n\n'),
+      MAX_SOURCE_CHARS,
+    );
     const prompt = [
       SYSTEM_PROMPT,
       `\n\nUploaded lecture sources:\n${context}`,

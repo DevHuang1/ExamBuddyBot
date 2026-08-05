@@ -38,6 +38,7 @@ npm start
 | `GROQ_API_KEY` | Yes* | Preconfigured Groq key (*unless all users use `/apikey`) |
 | `PORT` | No | HTTP port for the health server (default `8080`) |
 | `TAVILY_API_KEY` | No | If set, used for web search instead of DuckDuckGo |
+| `MAX_SOURCE_CHARS` | No | Max chars of lecture sources sent to the model (default `20000`, to stay within Groq's free-tier TPM) |
 
 ## Docker
 
