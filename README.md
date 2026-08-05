@@ -8,7 +8,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📄 **Send a PDF or PPTX** — saved as a lecture source (with page/slide numbers) for answering questions.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo).
 - 📖 **Citations + links** — answers cite the source PDF and page number, and include a related web link.
-- ⚙️ **Circuit diagrams** — for circuit/diagram questions the bot renders a Graphviz diagram and sends it as an image in chat.
+- ⚙️ **Circuit diagrams** — for circuit/diagram questions the bot draws real gate symbols (AND/OR/NOT/XOR/NAND/NOR) with wires and sends the diagram as an image in chat.
 - 💬 **Conversation memory** — remembers your recent Q&A so follow-up questions have context.
 - 🔑 **Per-user Groq API keys** — optional; falls back to a preconfigured key. Keys persist to `/data/keys.json` (Railway) or local `data/` and can be cleared anytime.
 - 🧠 **Custom model** — choose your own Groq text model.

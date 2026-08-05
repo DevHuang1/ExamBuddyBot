@@ -6,6 +6,7 @@ const path = require('path');
 const pdfParse = require('pdf-parse');
 const JSZip = require('jszip');
 const { Resvg } = require('@resvg/resvg-js');
+const { renderCircuit } = require('./circuit');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || '').trim();
@@ -193,23 +194,24 @@ function maybeDiagram(text) {
 }
 
 const DIAGRAM_HINT =
-  '\nIf a diagram would help answer this question, also include a Graphviz "dot" program inside a ```dot ... ``` code block. ' +
-  'Draw the circuit with labeled nodes for inputs, gates (AND, OR, NOT, XOR), and outputs, with edges for the wires. ' +
-  'The dot block must be valid Graphviz and self-contained. Do not describe the diagram in words outside the block.';
+  '\nIf a diagram would help answer this question, include a circuit description as JSON inside a ```circuit ... ``` code block with this exact shape: ' +
+  '{"inputs":["A","B"],"outputs":["S","Cout"],"gates":[{"id":"g1","type":"xor","inputs":["A","B"],"output":"S"},{"id":"g2","type":"and","inputs":["A","B"],"output":"Cout"}]}. ' +
+  'Gate types allowed: and, or, not, xor, nand, nor, xnor, buffer. "output" is the signal name a gate produces; signal names must be consistent, and outputs must be listed in "outputs". ' +
+  'Do not describe the diagram in words outside the block.';
 
-async function renderDiagramPng(dot) {
-  const viz = await import('@viz-js/viz');
-  const inst = await viz.instance();
-  const svg = inst.renderString(dot, { format: 'svg' });
+async function renderDiagramPng(spec) {
+  const svg = renderCircuit(spec);
   const r = new Resvg(svg, { fitTo: { mode: 'width', value: 1100 } });
   return r.render().asPng();
 }
 
 async function extractAndSendDiagram(chatId, answer) {
-  const m = answer.match(/```(?:dot|graphviz)\n([\s\S]*?)```/);
+  const m = answer.match(/```(?:circuit|json)\n([\s\S]*?)```/);
   if (!m) return null;
   try {
-    const png = await renderDiagramPng(m[1].trim());
+    const spec = JSON.parse(m[1].trim());
+    if (!spec || !Array.isArray(spec.gates)) return null;
+    const png = await renderDiagramPng(spec);
     if (!png) return null;
     await sendPhoto(chatId, png, '⚙️ Circuit diagram');
     return true;
@@ -220,7 +222,7 @@ async function extractAndSendDiagram(chatId, answer) {
 }
 
 function stripDotBlock(answer) {
-  return String(answer).replace(/```(?:dot|graphviz)\n[\s\S]*?```/g, '').trim();
+  return String(answer).replace(/```(?:dot|graphviz|circuit|json)\n[\s\S]*?```/g, '').trim();
 }
 
 async function send(chatId, text) {
