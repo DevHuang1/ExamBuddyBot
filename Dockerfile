@@ -8,6 +8,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY server.js circuit.js ./
+COPY fonts/ ./fonts/
 
 EXPOSE 8080
 

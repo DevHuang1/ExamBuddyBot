@@ -204,8 +204,16 @@ const DIAGRAM_HINT =
   'Do not describe the diagram in words outside the block.';
 
 async function renderDiagramPng(spec) {
-  const svg = renderCircuit(spec);
-  const r = new Resvg(svg, { fitTo: { mode: 'width', value: 1100 } });
+  const svg = await renderCircuit(spec);
+  if (!svg) return null;
+  const r = new Resvg(svg, {
+    fitTo: { mode: 'width', value: 1100 },
+    font: {
+      fontFiles: [path.join(__dirname, 'fonts', 'DejaVuSans.ttf')],
+      loadSystemFonts: false,
+      defaultFontFamily: 'DejaVu Sans',
+    },
+  });
   return r.render().asPng();
 }
 
