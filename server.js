@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const pdfParse = require('pdf-parse');
 const JSZip = require('jszip');
+const { Resvg } = require('@resvg/resvg-js');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || '').trim();
@@ -85,6 +86,7 @@ const HELP_TEXT =
   '• <b>Forward an image</b> (question paper, homework, notes) – I read it and answer directly.\n' +
   '• <b>Send a PDF or PPTX</b> – saved as a source (with page/slide numbers) for answering questions.\n' +
   '• <b>Send a text question</b> – answered from your sources, or from the web.\n' +
+  '• <b>Circuit questions</b> – get a drawn diagram as an image.\n' +
   '• <b>Remembers your recent Q&amp;A</b> – follow-up questions have context.\n\n' +
   'Commands:\n' +
   '/apikey &lt;key&gt; – set your own Groq API key\n' +
@@ -176,6 +178,51 @@ async function tg(method, payload) {
   return data.result;
 }
 
+async function sendPhoto(chatId, png, caption) {
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('photo', new Blob([png], { type: 'image/png' }), 'circuit.png');
+  if (caption) form.append('caption', caption);
+  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.description || 'sendPhoto failed');
+}
+
+function maybeDiagram(text) {
+  return /circuit|diagram|schematic|\bgate\b|adder|subtracter|subtractor|flip-?flop|latch|multiplexer|demultiplexer|demux|encoder|decoder|counter|register|waveform|timing diagram|block diagram|\bdraw\b|\bsketch\b|show (me )?the circuit|truth table|karnaugh|k-?map/i.test(text);
+}
+
+const DIAGRAM_HINT =
+  '\nIf a diagram would help answer this question, also include a Graphviz "dot" program inside a ```dot ... ``` code block. ' +
+  'Draw the circuit with labeled nodes for inputs, gates (AND, OR, NOT, XOR), and outputs, with edges for the wires. ' +
+  'The dot block must be valid Graphviz and self-contained. Do not describe the diagram in words outside the block.';
+
+async function renderDiagramPng(dot) {
+  const viz = await import('@viz-js/viz');
+  const inst = await viz.instance();
+  const svg = inst.renderString(dot, { format: 'svg' });
+  const r = new Resvg(svg, { fitTo: { mode: 'width', value: 1100 } });
+  return r.render().asPng();
+}
+
+async function extractAndSendDiagram(chatId, answer) {
+  const m = answer.match(/```(?:dot|graphviz)\n([\s\S]*?)```/);
+  if (!m) return null;
+  try {
+    const png = await renderDiagramPng(m[1].trim());
+    if (!png) return null;
+    await sendPhoto(chatId, png, '⚙️ Circuit diagram');
+    return true;
+  } catch (err) {
+    console.error('Diagram render failed:', err.message);
+    return null;
+  }
+}
+
+function stripDotBlock(answer) {
+  return String(answer).replace(/```(?:dot|graphviz)\n[\s\S]*?```/g, '').trim();
+}
+
 async function send(chatId, text) {
   await tg('sendMessage', {
     chat_id: chatId,
@@ -221,6 +268,89 @@ async function downloadFile(fileId) {
 
 function truncate(text, max = 40000) {
   return text.length > max ? text.slice(0, max) + '\n…[truncated]' : text;
+}
+
+const STOPWORDS = new Set(
+  'a an and or of in on for to is are was were be been being this that these those with from by at as it its i you we they he she them their have has had do does did not no yes but if then else than so such can could will would may might must should about into over under between during after before above below up down out off again once here there when where why how all any both each few more most other some own only too very just because into via'.split(/\s+/),
+);
+
+function keywordMap(text) {
+  const map = new Map();
+  for (const w of String(text || '').toLowerCase().split(/[^a-z0-9]+/)) {
+    if (w.length < 3 || STOPWORDS.has(w)) continue;
+    map.set(w, (map.get(w) || 0) + 1);
+  }
+  return map;
+}
+
+function chunkText(text, size = 900) {
+  const parts = String(text || '').split(/(?=\[Page \d+\]|\[Slide \d+\])/);
+  const chunks = [];
+  let current = '';
+  for (const p of parts) {
+    if (current && (current + p).length > size) {
+      chunks.push(current);
+      current = p;
+    } else {
+      current += p;
+    }
+    while (current.length > size) {
+      chunks.push(current.slice(0, size));
+      current = current.slice(size);
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function chunkLabel(s, num, chunk) {
+  const kind = s.type === 'pptx' ? 'Slides' : 'PDF';
+  return `<source ${num}> ${kind} "${s.name}"\n${chunk}\n</source ${num}>`;
+}
+
+function buildContext(sources, question, maxChars) {
+  const qkeys = keywordMap(question);
+  const scored = [];
+  sources.forEach((s, i) => {
+    const nameKeys = keywordMap(s.name);
+    chunkText(s.text).forEach((chunk, j) => {
+      const ckeys = keywordMap(chunk);
+      let score = 0;
+      for (const [k, q] of qkeys) if (ckeys.has(k)) score += q * 3;
+      for (const [k] of nameKeys) if (ckeys.has(k)) score += 5;
+      scored.push({ i, j, chunk, score });
+    });
+  });
+  if (!scored.length) return '';
+
+  const used = new Set();
+  const chosen = [];
+  let totalLen = 0;
+  const addChunk = (c) => {
+    if (used.has(c)) return false;
+    const item = chunkLabel(sources[c.i], c.i + 1, c.chunk);
+    if (totalLen + item.length > maxChars) return false;
+    used.add(c);
+    chosen.push(c);
+    totalLen += item.length;
+    return true;
+  };
+
+  const bySource = new Map();
+  for (const c of scored) {
+    if (!bySource.has(c.i)) bySource.set(c.i, []);
+    bySource.get(c.i).push(c);
+  }
+  for (const list of bySource.values()) {
+    list.sort((a, b) => b.score - a.score);
+    addChunk(list[0]);
+  }
+  const rest = [...scored].sort((a, b) => b.score - a.score);
+  for (const c of rest) {
+    if (!addChunk(c)) break;
+  }
+  chosen.sort((a, b) => a.i - b.i || a.j - b.j);
+  return chosen.map((c) => chunkLabel(sources[c.i], c.i + 1, c.chunk)).join('\n\n');
 }
 
 function maskKey(key) {
@@ -388,36 +518,34 @@ async function handleText(chatId, text, { record = true } = {}) {
   await typing(chatId);
 
   if (usablePdfs.length || usableImages.length) {
-    const context = truncate(
-      usablePdfs
-        .map((s, i) => `<source ${i + 1}> ${s.type === 'pptx' ? 'Slides' : 'PDF'} "${s.name}" (${s.pages} ${s.type === 'pptx' ? 'slides' : 'pages'})\n${truncate(s.text)}\n</source ${i + 1}>`)
-        .join('\n\n'),
-      MAX_SOURCE_CHARS,
-    );
+    const context = buildContext(usablePdfs, text, MAX_SOURCE_CHARS);
     const prompt = [
       SYSTEM_PROMPT,
       '\nWhen you answer from the sources, cite the source number and the page/slide number (e.g. "PDF 1, page 3" or "Slides 2, slide 5").',
+      maybeDiagram(text) ? DIAGRAM_HINT : '',
       `\n\nUploaded lecture sources:\n${context}`,
       `\n\nQuestion: ${text}`,
-    ].join('');
+    ].filter(Boolean).join('');
     const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
     if (record) {
       pushHistory(chatId, 'user', text);
-      pushHistory(chatId, 'assistant', answer);
+      pushHistory(chatId, 'assistant', stripDotBlock(answer));
     }
+    await sendLong(chatId, `📚 Answered from ${usablePdfs.length + usableImages.length} source(s)\n\n`, stripDotBlock(answer));
+    await extractAndSendDiagram(chatId, answer);
     const link = await findRelatedLink(text);
-    await sendLong(chatId, `📚 Answered from ${usablePdfs.length + usableImages.length} source(s)\n\n`, answer);
     if (link) await send(chatId, `🔗 Similar answers: ${link}`);
   } else {
     await send(chatId, '🔎 No sources yet – searching the web…');
     const webContext = await webSearch(text);
-    const prompt = `${webContext}\n\nQuestion: ${text}`;
+    const prompt = `${webContext}\n\n${maybeDiagram(text) ? DIAGRAM_HINT + '\n' : ''}Question: ${text}`;
     const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
     if (record) {
       pushHistory(chatId, 'user', text);
-      pushHistory(chatId, 'assistant', answer);
+      pushHistory(chatId, 'assistant', stripDotBlock(answer));
     }
-    await sendLong(chatId, '🌐 Web answer (no sources uploaded)\n\n', answer);
+    await sendLong(chatId, '🌐 Web answer (no sources uploaded)\n\n', stripDotBlock(answer));
+    await extractAndSendDiagram(chatId, answer);
   }
 }
 
