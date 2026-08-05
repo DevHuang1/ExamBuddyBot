@@ -8,6 +8,7 @@ const pdfParse = require('pdf-parse');
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || '').trim();
 const TAVILY_API_KEY = (process.env.TAVILY_API_KEY || '').trim();
+const FIRECRAWL_API_KEY = (process.env.FIRECRAWL_API_KEY || '').trim();
 const TEXT_MODEL = process.env.TEXT_MODEL || 'llama-3.3-70b-versatile';
 const VISION_MODEL = process.env.VISION_MODEL || 'llama-3.2-90b-vision-preview';
 const MAX_SOURCE_CHARS = parseInt(process.env.MAX_SOURCE_CHARS || '20000', 10);
@@ -189,7 +190,34 @@ async function groqChat({ chatId, model, systemPrompt, userText, images }) {
   }
 }
 
+async function firecrawlSearch(query) {
+  const res = await fetch('https://api.firecrawl.dev/v1/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${FIRECRAWL_API_KEY}` },
+    body: JSON.stringify({ query, limit: 5, scrapeOptions: { formats: ['markdown'], onlyMainContent: true } }),
+  });
+  if (!res.ok) throw new Error(`Firecrawl search failed (HTTP ${res.status}).`);
+  const data = await res.json();
+  const results = (data.data || []).filter((r) => r.url && (r.title || r.description || r.markdown));
+  if (!results.length) throw new Error('No useful web results found.');
+
+  const pieces = [];
+  for (const r of results.slice(0, 2)) {
+    if (r.markdown && r.markdown.trim()) {
+      pieces.push(`Source: ${r.title || r.url}\n${truncate(r.markdown, 4000)}`);
+    } else if (r.description) {
+      pieces.push(`${r.title || r.url}: ${r.description}`);
+    }
+  }
+  for (const r of results.slice(2)) {
+    if (r.title && r.description) pieces.push(`${r.title}: ${r.description}`);
+  }
+  if (!pieces.length) throw new Error('No useful web results found.');
+  return pieces.join('\n\n');
+}
+
 async function webSearch(query) {
+  if (FIRECRAWL_API_KEY) return firecrawlSearch(query);
   if (TAVILY_API_KEY) {
     const res = await fetch('https://api.tavily.com/search', {
       method: 'POST',
@@ -204,20 +232,35 @@ async function webSearch(query) {
       if (pieces.length) return pieces.slice(0, 4).join('\n');
     }
   }
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-  const res = await fetch(url);
-  const data = await res.json();
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36' },
+  });
+  if (!res.ok) throw new Error('Web search failed.');
+  const html = await res.text();
   const pieces = [];
-  if (data.AbstractText) pieces.push(`${data.Heading || 'Result'}: ${data.AbstractText}`);
-  const flatten = (topics) => {
-    for (const t of topics || []) {
-      if (t.Text) pieces.push(t.Text);
-      if (t.Topics) flatten(t.Topics);
-    }
-  };
-  flatten(data.RelatedTopics);
+  const re = /<a[^>]*class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  let m;
+  while ((m = re.exec(html)) && pieces.length < 5) {
+    const title = stripTags(m[1]);
+    const snippet = stripTags(m[2]);
+    if (title && snippet) pieces.push(`${title}: ${snippet}`);
+  }
   if (!pieces.length) throw new Error('No useful web results found.');
-  return pieces.slice(0, 5).join('\n');
+  return pieces.join('\n');
+}
+
+function stripTags(s) {
+  return String(s)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function escapeHtml(s) {

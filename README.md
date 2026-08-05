@@ -37,7 +37,8 @@ npm start
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
 | `GROQ_API_KEY` | Yes* | Preconfigured Groq key (*unless all users use `/apikey`) |
 | `PORT` | No | HTTP port for the health server (default `8080`) |
-| `TAVILY_API_KEY` | No | If set, used for web search instead of DuckDuckGo |
+| `TAVILY_API_KEY` | No | Used for web search if Firecrawl isn't set |
+| `FIRECRAWL_API_KEY` | No | If set, web search uses Firecrawl (search + scrapes the top 2 pages for real content) |
 | `MAX_SOURCE_CHARS` | No | Max chars of lecture sources sent to the model (default `20000`, to stay within Groq's free-tier TPM) |
 
 ## Docker
