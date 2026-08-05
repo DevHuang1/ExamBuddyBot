@@ -23,16 +23,17 @@ function renderPage(pageData) {
 }
 
 const DATA_DIR = path.join(__dirname, 'data');
-const KEYS_FILE = resolveKeysFile();
+const KEYS_FILE = resolveFile('KEYS_FILE', 'keys.json');
+const SOURCES_FILE = resolveFile('SOURCES_FILE', 'sources.json');
 
-function resolveKeysFile() {
-  if (process.env.KEYS_FILE) return process.env.KEYS_FILE;
-  if (process.env.DATA_DIR) return path.join(process.env.DATA_DIR, 'keys.json');
+function resolveFile(envVar, name) {
+  if (process.env[envVar]) return process.env[envVar];
+  if (process.env.DATA_DIR) return path.join(process.env.DATA_DIR, name);
   try {
     fs.accessSync('/data', fs.constants.W_OK);
-    return path.join('/data', 'keys.json');
+    return path.join('/data', name);
   } catch {
-    return path.join(DATA_DIR, 'keys.json');
+    return path.join(DATA_DIR, name);
   }
 }
 
@@ -112,6 +113,31 @@ function saveKeys() {
   }
 }
 
+function loadSources() {
+  try {
+    if (fs.existsSync(SOURCES_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(SOURCES_FILE, 'utf8'));
+      for (const [chatId, store] of Object.entries(parsed)) {
+        sources.set(Number(chatId), store);
+      }
+    }
+  } catch (err) {
+    console.error('Could not load sources file:', err.message);
+  }
+}
+
+function saveSources() {
+  try {
+    const dir = path.dirname(SOURCES_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const obj = {};
+    for (const [chatId, store] of sources) obj[chatId] = store;
+    fs.writeFileSync(SOURCES_FILE, JSON.stringify(obj), { mode: 0o600 });
+  } catch (err) {
+    console.error('Could not save sources file:', err.message);
+  }
+}
+
 function requireConfig() {
   if (!BOT_TOKEN) {
     console.error('TELEGRAM_BOT_TOKEN is missing. Copy .env.example to .env and fill it in.');
@@ -143,17 +169,22 @@ async function send(chatId, text) {
 }
 
 async function sendLong(chatId, header, text) {
+  const escaped = escapeHtml(text);
   const chunks = [];
-  let rest = String(text || '');
-  while (rest.length > 3900) {
-    let cut = rest.lastIndexOf('\n', 3900);
-    if (cut < 1500) cut = 3900;
+  let rest = String(escaped);
+  while (rest.length > 3800) {
+    let cut = rest.lastIndexOf('\n', 3800);
+    if (cut < 1500) cut = 3800;
     chunks.push(rest.slice(0, cut));
     rest = rest.slice(cut);
   }
   chunks.push(rest);
-  for (let i = 0; i < chunks.length; i++) {
-    await send(chatId, (i === 0 ? header : '') + escapeHtml(chunks[i]));
+  const capped = chunks.slice(0, 8);
+  for (let i = 0; i < capped.length; i++) {
+    await send(chatId, (i === 0 ? header : '') + capped[i]);
+  }
+  if (chunks.length > capped.length) {
+    await send(chatId, '…[answer truncated, too long]');
   }
 }
 
@@ -442,11 +473,13 @@ async function handleDocument(chatId, doc) {
       fs.unlinkSync(tmp);
       store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages });
       sources.set(chatId, store);
+      saveSources();
       await send(chatId, `📄 Added "${escapeHtml(name)}" as PDF source (${store.pdfs.length} PDF source(s)). Ask me a question now.`);
     } else {
       const mime = doc.mime_type || 'image/jpeg';
       store.images.push({ name, base64: buf.toString('base64'), mime });
       sources.set(chatId, store);
+      saveSources();
       await send(chatId, `🖼 Added "${escapeHtml(name)}" as image source (${store.images.length} image source(s)). Ask me a question now.`);
     }
   } catch (err) {
@@ -530,6 +563,7 @@ async function handleUpdate(update) {
     sources.delete(chatId);
     histories.delete(chatId);
     lastQuestions.delete(chatId);
+    saveSources();
     return send(chatId, 'All sources and conversation memory cleared.');
   }
   if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry' || cmd === '/pyanloke') {
@@ -575,6 +609,7 @@ async function poll() {
 async function main() {
   requireConfig();
   loadKeys();
+  loadSources();
   startHealthServer();
   const me = await tg('getMe', {});
   console.log(`🤖 ExamBuddy bot running as @${me.username}`);
