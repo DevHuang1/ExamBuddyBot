@@ -1,0 +1,58 @@
+# ExamBuddyBot
+
+Telegram bot that answers exam questions from forwarded images, uploaded sources (PDFs/images), or web search. Uses Groq (Llama-3.3-70B for text, Llama-3.2-90B for vision).
+
+## Features
+
+- 📷 **Forward an image** (question paper, homework, notes) — read and answered directly using a vision model.
+- 📄 **Send a PDF** — saved as a lecture source for answering questions.
+- ✍️ **Send a text question** — answered from your uploaded sources, or from the web (DuckDuckGo / Tavily).
+- 🔑 **Per-user Groq API keys** — optional; falls back to a preconfigured key. Keys persist to `/data/keys.json` (Railway) or local `data/` and can be cleared anytime.
+- 🧠 **Custom model** — choose your own Groq text model.
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `/start` | Start the bot |
+| `/help` | Show help message |
+| `/apikey <key>` | Set your own Groq API key |
+| `/resetkey` | Go back to the preconfigured key |
+| `/model <name>` | Set your own text model (optional) |
+| `/sources` | List your uploaded sources |
+| `/clear` | Delete your sources |
+
+## Local Setup
+
+```bash
+cp .env.example .env   # add TELEGRAM_BOT_TOKEN and GROQ_API_KEY
+npm install
+npm start
+```
+
+### Environment variables
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
+| `GROQ_API_KEY` | Yes* | Preconfigured Groq key (*unless all users use `/apikey`) |
+| `PORT` | No | HTTP port for the health server (default `8080`) |
+| `TAVILY_API_KEY` | No | If set, used for web search instead of DuckDuckGo |
+
+## Docker
+
+```bash
+docker build -t exambuddybot .
+docker run -d --env-file .env -e PORT=8080 -p 8080:8080 exambuddybot
+```
+
+The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy.
+
+## Deploy to Railway
+
+1. Push this repo to GitHub.
+2. Railway → **New Project → Deploy from GitHub repo** → select the repo.
+3. **Variables**: add `TELEGRAM_BOT_TOKEN` and `GROQ_API_KEY` (`.env` is gitignored and not committed).
+4. Deploy and message the bot to confirm.
+
+> ⚠️ The bot uses long-polling, so only one instance may run at a time. Stop any local instance before Railway comes up, or you'll get 409 conflict errors.
