@@ -532,7 +532,7 @@ async function handleUpdate(update) {
     lastQuestions.delete(chatId);
     return send(chatId, 'All sources and conversation memory cleared.');
   }
-  if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry') {
+  if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry' || cmd === '/pyanloke') {
     const q = lastQuestions.get(chatId);
     if (!q) return send(chatId, 'No previous question to rethink. Ask me something first.');
     try {
