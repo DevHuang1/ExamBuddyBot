@@ -142,6 +142,21 @@ async function send(chatId, text) {
   });
 }
 
+async function sendLong(chatId, header, text) {
+  const chunks = [];
+  let rest = String(text || '');
+  while (rest.length > 3900) {
+    let cut = rest.lastIndexOf('\n', 3900);
+    if (cut < 1500) cut = 3900;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  chunks.push(rest);
+  for (let i = 0; i < chunks.length; i++) {
+    await send(chatId, (i === 0 ? header : '') + escapeHtml(chunks[i]));
+  }
+}
+
 async function typing(chatId) {
   try {
     await tg('sendChatAction', { chat_id: chatId, action: 'typing' });
@@ -343,8 +358,8 @@ async function handleText(chatId, text, { record = true } = {}) {
       pushHistory(chatId, 'assistant', answer);
     }
     const link = await findRelatedLink(text);
-    const linkLine = link ? `\n\n🔗 Similar answers: ${link}` : '';
-    await send(chatId, `📚 Answered from ${usablePdfs.length + usableImages.length} source(s)\n\n${escapeHtml(answer)}${linkLine}`);
+    await sendLong(chatId, `📚 Answered from ${usablePdfs.length + usableImages.length} source(s)\n\n`, answer);
+    if (link) await send(chatId, `🔗 Similar answers: ${link}`);
   } else {
     await send(chatId, '🔎 No sources yet – searching the web…');
     const webContext = await webSearch(text);
@@ -354,7 +369,7 @@ async function handleText(chatId, text, { record = true } = {}) {
       pushHistory(chatId, 'user', text);
       pushHistory(chatId, 'assistant', answer);
     }
-    await send(chatId, `🌐 Web answer (no sources uploaded)\n\n${escapeHtml(answer)}`);
+    await sendLong(chatId, '🌐 Web answer (no sources uploaded)\n\n', answer);
   }
 }
 
@@ -367,7 +382,7 @@ async function answerImages(chatId, images, caption) {
   ].join('');
   await send(chatId, `🔍 Reading ${images.length} image(s)…`);
   const answer = await groqChat({ chatId, model: VISION_MODEL, systemPrompt: VISION_PROMPT, userText: prompt, images });
-  await send(chatId, `🖼 Answered from forwarded image${images.length > 1 ? 's' : ''}\n\n${escapeHtml(answer)}`);
+  await sendLong(chatId, `🖼 Answered from forwarded image${images.length > 1 ? 's' : ''}\n\n`, answer);
 }
 
 async function grabPhoto(chatId, photo) {
