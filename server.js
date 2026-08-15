@@ -888,7 +888,29 @@ async function main() {
   poll();
 }
 
-main().catch((err) => {
-  console.error('Failed to start:', err.message);
-  process.exit(1);
-});
+function resetTestState() {
+  sources.clear();
+  albums.clear();
+  histories.clear();
+  lastQuestions.clear();
+  activeQuizzes.clear();
+  userKeys = {};
+  offset = 0;
+  polling = false;
+}
+
+module.exports = {
+  handleUpdate,
+  __test: {
+    activeQuizzes,
+    resetTestState,
+    sources,
+  },
+};
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('Failed to start:', err.message);
+    process.exit(1);
+  });
+}
