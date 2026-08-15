@@ -7,6 +7,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📷 **Forward an image** (question paper, homework, notes) — read and answered directly using a vision model.
 - 📄 **Send a PDF or PPTX** — saved as a lecture source (with page/slide numbers) for answering questions.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo).
+- 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback.
 - 📖 **Citations + links** — answers cite the source PDF and page number, and include a related web link.
 - ⚙️ **Circuit diagrams** — for circuit/diagram questions the bot draws real gate symbols (AND/OR/NOT/XOR/NAND/NOR) with wires and sends the diagram as an image in chat.
 - 💬 **Conversation memory** — remembers your recent Q&A so follow-up questions have context.
@@ -23,6 +24,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 | `/resetkey` | Go back to the preconfigured key |
 | `/model <name>` | Set your own text model (optional) |
 | `/sources` | List your uploaded PDF/PPTX/image sources |
+| `/quiz [topic]` | Create one source-grounded multiple-choice practice question; reply with A–D to answer |
 | `/rethink` | Re-answer your last question |
 | `/clear` | Delete your sources and conversation memory |
 
@@ -44,6 +46,9 @@ npm start
 | `TAVILY_API_KEY` | No | Used for web search if Firecrawl isn't set |
 | `FIRECRAWL_API_KEY` | No | If set, web search uses Firecrawl (search + scrapes the top 2 pages for real content) |
 | `MAX_SOURCE_CHARS` | No | Max chars of lecture sources sent to the model (default `20000`, to stay within Groq's free-tier TPM) |
+| `MAX_UPLOAD_BYTES` | No | Maximum accepted upload size in bytes (default `12582912`, or 12 MB) |
+| `MAX_SOURCES_PER_CHAT` | No | Maximum PDF/PPTX/image sources stored for one chat (default `12`) |
+| `SOURCES_FILE` | No | Optional path for persisted uploaded sources (defaults to `/data/sources.json` where available) |
 
 ## Docker
 
@@ -52,7 +57,7 @@ docker build -t exambuddybot .
 docker run -d --env-file .env -e PORT=8080 -p 8080:8080 exambuddybot
 ```
 
-The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy.
+The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. The image also includes the quiz utility module used by the source-grounded practice flow.
 
 ## Deploy to Railway
 

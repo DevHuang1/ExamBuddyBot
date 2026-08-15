@@ -7,6 +7,7 @@ const pdfParse = require('pdf-parse');
 const JSZip = require('jszip');
 const { Resvg } = require('@resvg/resvg-js');
 const { renderCircuit } = require('./circuit');
+const { normalizeQuiz, parseQuizAnswer } = require('./quiz');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || '').trim();
@@ -15,6 +16,8 @@ const FIRECRAWL_API_KEY = (process.env.FIRECRAWL_API_KEY || '').trim();
 const TEXT_MODEL = process.env.TEXT_MODEL || 'llama-3.3-70b-versatile';
 const VISION_MODEL = process.env.VISION_MODEL || 'qwen/qwen3.6-27b';
 const MAX_SOURCE_CHARS = parseInt(process.env.MAX_SOURCE_CHARS || '20000', 10);
+const MAX_UPLOAD_BYTES = parseInt(process.env.MAX_UPLOAD_BYTES || String(12 * 1024 * 1024), 10);
+const MAX_SOURCES_PER_CHAT = parseInt(process.env.MAX_SOURCES_PER_CHAT || '12', 10);
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 
@@ -82,11 +85,18 @@ const VISION_PROMPT =
   'Be straight to the point: give the direct answer first, then a brief 1-3 sentence explanation. ' +
   'If any question is unreadable, say so and skip it. Format with numbered answers where there are multiple questions.';
 
+const QUIZ_PROMPT =
+  'You create one reliable multiple-choice practice question using ONLY the provided lecture-source context. ' +
+  'Return JSON only, with exactly this shape: {"topic":"short topic","question":"question text","choices":["choice A","choice B","choice C","choice D"],"answerIndex":0,"explanation":"brief explanation grounded in the source"}. ' +
+  'Use exactly four plausible choices, put the zero-based correct choice in answerIndex, and do not mention that you are an AI. ' +
+  'If the source context is insufficient, return {"error":"insufficient_source"}.';
+
 const HELP_TEXT =
   '📚 <b>ExamBuddy Bot</b>\n\n' +
   '• <b>Forward an image</b> (question paper, homework, notes) – I read it and answer directly.\n' +
   '• <b>Send a PDF or PPTX</b> – saved as a source (with page/slide numbers) for answering questions.\n' +
   '• <b>Send a text question</b> – answered from your sources, or from the web.\n' +
+  '• <b>Source-grounded quizzes</b> – upload a PDF/PPTX, then use /quiz.\n' +
   '• <b>Circuit questions</b> – get a drawn diagram as an image.\n' +
   '• <b>Remembers your recent Q&amp;A</b> – follow-up questions have context.\n\n' +
   'Commands:\n' +
@@ -94,6 +104,7 @@ const HELP_TEXT =
   '/resetkey – go back to the preconfigured key\n' +
   '/model &lt;name&gt; – set your own text model (optional)\n' +
   '/sources – list your uploaded sources\n' +
+  '/quiz [topic] – create one practice question from your sources\n' +
   '/rethink – re-answer your last question\n' +
   '/clear – delete your sources and conversation memory\n' +
   '/help – this message';
@@ -102,6 +113,7 @@ const sources = new Map(); // chatId -> { pdfs: [{name,text,pages}], images: [{n
 const albums = new Map();  // mediaGroupId -> { chatId, photos: [{base64,mime}], timer }
 const histories = new Map(); // chatId -> [{ role: 'user'|'assistant', content }]
 const lastQuestions = new Map(); // chatId -> last text question
+const activeQuizzes = new Map(); // chatId -> validated multiple-choice quiz
 const MAX_HISTORY = 10;
 let userKeys = {};         // chatId -> { groqKey, model }
 
@@ -264,6 +276,56 @@ async function sendLong(chatId, header, text) {
   if (chunks.length > capped.length) {
     await send(chatId, '…[answer truncated, too long]');
   }
+}
+
+function quizMessage(quiz) {
+  const letters = ['A', 'B', 'C', 'D'];
+  const choices = quiz.choices.map((choice, index) => `<b>${letters[index]}.</b> ${escapeHtml(choice)}`).join('\n');
+  return `📝 <b>Practice quiz: ${escapeHtml(quiz.topic)}</b>\n\n${escapeHtml(quiz.question)}\n\n${choices}\n\nReply with A, B, C, or D.`;
+}
+
+async function createQuiz(chatId, topic) {
+  const store = sources.get(chatId) || { pdfs: [], images: [] };
+  const context = buildContext(store.pdfs, topic || 'practice question', MAX_SOURCE_CHARS);
+  if (!context) {
+    await send(chatId, '📝 To create a reliable quiz, first upload a PDF or PPTX source. Then use <code>/quiz</code> or <code>/quiz &lt;topic&gt;</code>.');
+    return;
+  }
+
+  await typing(chatId);
+  const request = [
+    `Requested focus: ${topic || 'choose an important concept from the uploaded sources'}.`,
+    'Lecture-source context:',
+    context,
+  ].join('\n\n');
+  const raw = await groqChat({
+    chatId,
+    model: userKeys[chatId]?.model || TEXT_MODEL,
+    systemPrompt: QUIZ_PROMPT,
+    userText: request,
+    history: [],
+  });
+  let quiz;
+  try {
+    const parsed = JSON.parse(String(raw).replace(/```(?:json)?\s*|\s*```/gi, ''));
+    if (parsed?.error === 'insufficient_source') throw new Error('The uploaded sources do not contain enough material for a reliable quiz on that topic.');
+    quiz = normalizeQuiz(parsed);
+  } catch (err) {
+    throw new Error(`Quiz creation failed safely: ${err.message}`);
+  }
+  activeQuizzes.set(chatId, quiz);
+  await send(chatId, quizMessage(quiz));
+}
+
+async function handleQuizAnswer(chatId, answerIndex) {
+  const quiz = activeQuizzes.get(chatId);
+  if (!quiz) return false;
+  activeQuizzes.delete(chatId);
+  const correct = answerIndex === quiz.answerIndex;
+  const letters = ['A', 'B', 'C', 'D'];
+  const result = correct ? '✅ <b>Correct.</b>' : `❌ <b>Not quite.</b> The correct answer is <b>${letters[quiz.answerIndex]}. ${escapeHtml(quiz.choices[quiz.answerIndex])}</b>.`;
+  await send(chatId, `${result}\n\n<b>Why:</b> ${escapeHtml(quiz.explanation)}\n\nUse <code>/quiz</code> for another source-grounded question.`);
+  return true;
 }
 
 async function typing(chatId) {
@@ -634,12 +696,19 @@ async function handlePhoto(chatId, photo, caption, mediaGroupId) {
 
 async function handleDocument(chatId, doc) {
   try {
+    if (doc.file_size && doc.file_size > MAX_UPLOAD_BYTES) {
+      throw new Error(`That file is too large. Please send a file smaller than ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`);
+    }
+    const store = sources.get(chatId) || { pdfs: [], images: [] };
+    const sourceCount = store.pdfs.length + store.images.length;
+    if (sourceCount >= MAX_SOURCES_PER_CHAT) {
+      throw new Error(`You have reached the source limit (${MAX_SOURCES_PER_CHAT}). Use /clear before adding more files.`);
+    }
     const buf = await downloadFile(doc.file_id);
     const name = doc.file_name || `doc_${Date.now()}`;
     const lower = name.toLowerCase();
     const isPdf = (doc.mime_type === 'application/pdf') || lower.endsWith('.pdf');
     const isPptx = (doc.mime_type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') || lower.endsWith('.pptx');
-    const store = sources.get(chatId) || { pdfs: [], images: [] };
     if (isPdf) {
       const tmp = path.join(os.tmpdir(), `exambuddy_${Date.now()}.pdf`);
       fs.writeFileSync(tmp, buf);
@@ -745,12 +814,20 @@ async function handleUpdate(update) {
     store.images.forEach((s, i) => lines.push(`Image ${i + 1}: ${s.name}`));
     return send(chatId, lines.length ? `Your sources:\n${lines.map(escapeHtml).join('\n')}` : 'No sources yet. Send a PDF or photo.');
   }
+  if (cmd === '/quiz') {
+    try {
+      return await createQuiz(chatId, args);
+    } catch (err) {
+      return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
+    }
+  }
   if (cmd === '/clear') {
     sources.delete(chatId);
     histories.delete(chatId);
     lastQuestions.delete(chatId);
+    activeQuizzes.delete(chatId);
     saveSources();
-    return send(chatId, 'All sources and conversation memory cleared.');
+    return send(chatId, 'All sources, conversation memory, and active quiz state cleared.');
   }
   if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry' || cmd === '/pyanloke') {
     const q = lastQuestions.get(chatId);
@@ -763,8 +840,13 @@ async function handleUpdate(update) {
     return;
   }
   if (text && !text.startsWith('/')) {
+    const quizAnswer = activeQuizzes.has(chatId) ? parseQuizAnswer(text) : null;
     try {
-      await handleText(chatId, text);
+      if (quizAnswer !== null) {
+        await handleQuizAnswer(chatId, quizAnswer);
+      } else {
+        await handleText(chatId, text);
+      }
     } catch (err) {
       await send(chatId, `⚠️ Error: ${escapeHtml(err.message)}`).catch(() => {});
     }
