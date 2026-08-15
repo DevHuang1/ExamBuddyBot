@@ -113,3 +113,44 @@ test('accepts a 4:1 multiplexer and supported flip-flop variants', () => {
     assert.equal(spec.gates[0].type, variant.type);
   }
 });
+
+test('accepts decoder, encoder, and multi-bit register components', () => {
+  const decoder = validateCircuitSpec({
+    inputs: ['A1', 'A0', 'EN'],
+    outputs: ['Ybus'],
+    gates: [{ id: 'decode', type: 'dec2_4', inputs: ['A1', 'A0', 'EN'], output: 'Ybus' }],
+  });
+  const encoder = validateCircuitSpec({
+    inputs: ['D0', 'D1', 'D2', 'D3'],
+    outputs: ['Ybus'],
+    gates: [{ id: 'encode', type: 'enc4_2', inputs: ['D0', 'D1', 'D2', 'D3'], output: 'Ybus' }],
+  });
+  const register = validateCircuitSpec({
+    inputs: ['Dbus', 'CLK'],
+    outputs: ['Qbus'],
+    gates: [{ id: 'store', type: 'reg', bits: 8, inputs: ['Dbus', 'CLK'], output: 'Qbus' }],
+  });
+
+  assert.equal(decoder.gates[0].type, 'dec2_4');
+  assert.equal(encoder.gates[0].type, 'enc4_2');
+  assert.equal(register.gates[0].bits, 8);
+});
+
+test('rejects invalid component pin counts and register widths', () => {
+  assert.throws(
+    () => validateCircuitSpec({
+      inputs: ['A1', 'A0'],
+      outputs: ['Ybus'],
+      gates: [{ id: 'decode', type: 'dec2_4', inputs: ['A1', 'A0'], output: 'Ybus' }],
+    }),
+    /2-to-4 decoder.*exactly 3 inputs/,
+  );
+  assert.throws(
+    () => validateCircuitSpec({
+      inputs: ['Dbus', 'CLK'],
+      outputs: ['Qbus'],
+      gates: [{ id: 'store', type: 'reg', bits: 1, inputs: ['Dbus', 'CLK'], output: 'Qbus' }],
+    }),
+    /bits value from 2 to 32/,
+  );
+});

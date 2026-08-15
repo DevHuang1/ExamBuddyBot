@@ -13,6 +13,7 @@ const OUT_EXTRA = { and: 0, or: 0, xor: 0, buffer: 0, not: 10, nand: 10, nor: 10
 const BACK = { or: 6, nor: 6, xor: 4, xnor: 4 };
 const MULTIPLEXERS = new Set(['mux2', 'mux4']);
 const FLIP_FLOPS = new Set(['dff', 'jkff', 'tff', 'srff']);
+const CLOCKED_COMPONENTS = new Set([...FLIP_FLOPS, 'reg']);
 
 function round(n) {
   return Math.round(n * 10) / 10;
@@ -46,6 +47,11 @@ function gateBody(type, x, y) {
     case 'jkff':
     case 'tff':
     case 'srff':
+    case 'dec2_4':
+    case 'dec3_8':
+    case 'enc4_2':
+    case 'enc8_3':
+    case 'reg':
       return `M ${x},${y} L ${x + W},${y} L ${x + W},${y + H} L ${x},${y + H} Z`;
     default:
       return `M ${x},${y} L ${x + W},${y} L ${x + W},${y + H} L ${x},${y + H} Z`;
@@ -58,7 +64,8 @@ function gateExtraCurve(type, x, y) {
   return null;
 }
 
-function componentLabel(type) {
+function componentLabel(type, bits) {
+  if (type === 'reg') return `REG ${bits || '?'}-bit`;
   return {
     mux2: 'MUX 2:1',
     mux4: 'MUX 4:1',
@@ -66,11 +73,15 @@ function componentLabel(type) {
     jkff: 'JK FF',
     tff: 'T FF',
     srff: 'SR FF',
+    dec2_4: 'DEC 2:4',
+    dec3_8: 'DEC 3:8',
+    enc4_2: 'ENC 4:2',
+    enc8_3: 'ENC 8:3',
   }[type] || '';
 }
 
 function componentClockMark(type, x, y, w = GATE_W, h = GATE_H) {
-  if (!FLIP_FLOPS.has(type)) return '';
+  if (!CLOCKED_COMPONENTS.has(type)) return '';
   const cx = x;
   const cy = y + h * 0.75;
   return `M ${cx},${cy - 5} L ${cx + 8},${cy} L ${cx},${cy + 5}`;
@@ -80,12 +91,14 @@ function componentInPin(type, x, y, w, h, idx, total) {
   const standardY = total === 1 ? y + h / 2 : y + (h * (idx + 1)) / (total + 1);
   if (type === 'mux2' && idx === 2) return { x: x + w * 0.52, y: y + h };
   if (type === 'mux4' && idx >= 4) return { x: x + w * (idx === 4 ? 0.38 : 0.66), y: y + h };
-  if (FLIP_FLOPS.has(type) && idx === total - 1) return { x, y: y + h * 0.75 };
+  if (CLOCKED_COMPONENTS.has(type) && idx === total - 1) return { x, y: y + h * 0.75 };
   return { x: x + (MULTIPLEXERS.has(type) ? 8 : BACK[type] || 0), y: standardY };
 }
 
-function componentOverlay(type, x, y, w = GATE_W, h = GATE_H) {
-  const label = componentLabel(type);
+function componentOverlay(component, x, y, w = GATE_W, h = GATE_H) {
+  const type = typeof component === 'string' ? component : component.type;
+  const bits = typeof component === 'string' ? undefined : component.bits;
+  const label = componentLabel(type, bits);
   const clock = componentClockMark(type, x, y, w, h);
   const parts = [];
   if (label) parts.push(`<text x="${round(x + w / 2)}" y="${round(y + h / 2 + 5)}" text-anchor="middle" fill="#1f2937">${esc(label)}</text>`);
@@ -315,7 +328,7 @@ function renderV2(spec) {
   }
   parts.push('</g>');
   parts.push('<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">');
-  for (const g of L.gates) parts.push(componentOverlay(g.type, L.gateX(g), L.gateY(g)));
+  for (const g of L.gates) parts.push(componentOverlay(g, L.gateX(g), L.gateY(g)));
   parts.push('</g>');
   parts.push('<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">');
   for (const t of L.inputTracks) parts.push(`<text x="${round(L.inputLabelX)}" y="${round(t.y + 5)}" text-anchor="end" fill="#1d4ed8">${esc(t.name)}</text>`);
@@ -610,7 +623,7 @@ function renderGraphSvg(spec, L, built) {
   }
   svg += '</g>';
   svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">';
-  for (const m of L.gateById.values()) svg += componentOverlay(m.g.type, m.left, m.top, m.w, m.h);
+  for (const m of L.gateById.values()) svg += componentOverlay(m.g, m.left, m.top, m.w, m.h);
   svg += '</g>';
   svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">';
   for (const [s, p] of L.inputs) svg += `<text x="${round(p.x - 8)}" y="${round(p.y + 5)}" text-anchor="end" fill="#1d4ed8">${esc(s)}</text>`;
@@ -945,7 +958,7 @@ function manhattanSvg(spec, L, R) {
   }
   svg += '</g>';
   svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">';
-  for (const m of L.gateById.values()) svg += componentOverlay(m.g.type, m.left + tx, m.top + ty, m.w, m.h);
+  for (const m of L.gateById.values()) svg += componentOverlay(m.g, m.left + tx, m.top + ty, m.w, m.h);
   svg += '</g>';
   svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">';
   for (const [s, p] of L.inputs) svg += `<text x="${round(p.x + tx - 8)}" y="${round(p.y + ty + 5)}" text-anchor="end" fill="#1d4ed8">${esc(s)}</text>`;

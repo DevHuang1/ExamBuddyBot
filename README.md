@@ -9,7 +9,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo).
 - 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback.
 - 📖 **Hybrid source retrieval** — answers combine lexical matching with optional Hugging Face semantic embeddings, improving selection of relevant source passages while preserving a safe lexical fallback.
-- ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, and dependency before drawing clean symbols and wires. It supports one-input NOT/buffer gates, two- through four-input basic combinational gates, 2:1 and 4:1 multiplexers, plus D, JK, T, and SR flip-flops with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
+- ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, bit width, and dependency before drawing clean symbols and wires. It supports basic logic, 2:1 and 4:1 multiplexers, D/JK/T/SR flip-flops, 2-to-4 and 3-to-8 decoders, 4-to-2 and 8-to-3 encoders, plus configurable 2–32 bit registers with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context.
 - 🔒 **No user API keys** — only the deployment owner supplies `GROQ_API_KEY` as an environment secret; students use the bot without keys or model commands.
 
@@ -27,8 +27,13 @@ When a circuit diagram is requested, the bot can produce a validated `circuit` J
 | Flip-flop | `jkff` | `J`, `K`, `CLK` |
 | Flip-flop | `tff` | `T`, `CLK` |
 | Flip-flop | `srff` | `S`, `R`, `CLK` |
+| Decoder | `dec2_4` | `A1`, `A0`, `EN` → one named output bus |
+| Decoder | `dec3_8` | `A2`, `A1`, `A0`, `EN` → one named output bus |
+| Encoder | `enc4_2` | `D0`, `D1`, `D2`, `D3` → one named output bus |
+| Encoder | `enc8_3` | `D0` through `D7` → one named output bus |
+| Register | `reg` | `D_bus`, `CLK` with a `bits` integer from 2–32 → one named output bus |
 
-Each component produces one named output. Sequential components use `Q` as the recommended output name; complementary outputs and timing waveforms are not yet modeled.
+Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`, and `Qbus` for multi-bit signals. Sequential components use `Q` as the recommended single-bit output name; complementary outputs, individual bus-bit breakout, and timing waveforms are not yet modeled.
 
 ## Commands
 

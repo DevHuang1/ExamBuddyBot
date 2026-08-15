@@ -1,6 +1,7 @@
 const GATE_TYPES = new Set([
   'and', 'or', 'not', 'xor', 'nand', 'nor', 'xnor', 'buffer',
   'mux2', 'mux4', 'dff', 'jkff', 'tff', 'srff',
+  'dec2_4', 'dec3_8', 'enc4_2', 'enc8_3', 'reg',
 ]);
 const SIGNAL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 
@@ -19,6 +20,11 @@ const COMPONENT_RULES = {
   jkff: { exact: 3, label: 'JK flip-flop (J, K, CLK)' },
   tff: { exact: 2, label: 'T flip-flop (T, CLK)' },
   srff: { exact: 3, label: 'SR flip-flop (S, R, CLK)' },
+  dec2_4: { exact: 3, label: '2-to-4 decoder (A1, A0, EN)' },
+  dec3_8: { exact: 4, label: '3-to-8 decoder (A2, A1, A0, EN)' },
+  enc4_2: { exact: 4, label: '4-to-2 encoder (D0, D1, D2, D3)' },
+  enc8_3: { exact: 8, label: '8-to-3 encoder (D0 through D7)' },
+  reg: { exact: 2, label: 'multi-bit register (D_bus, CLK)' },
 };
 
 function identifier(value, label) {
@@ -47,6 +53,18 @@ function validateInputCount(gate, inputs) {
   }
 }
 
+function validateBits(gate, rawBits) {
+  if (gate.type !== 'reg') {
+    if (rawBits !== undefined) throw new Error(`Component ${gate.id} only supports the bits field for type reg.`);
+    return undefined;
+  }
+  const bits = Number(rawBits);
+  if (!Number.isInteger(bits) || bits < 2 || bits > 32) {
+    throw new Error(`Register ${gate.id} requires an integer bits value from 2 to 32.`);
+  }
+  return bits;
+}
+
 function validateCircuitSpec(spec) {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error('Circuit data must be an object.');
 
@@ -71,6 +89,7 @@ function validateCircuitSpec(spec) {
 
     const gateInputs = gate.inputs.map((signal, inputIndex) => identifier(signal, `Component ${id} input ${inputIndex + 1}`));
     validateInputCount({ id, type }, gateInputs);
+    const bits = validateBits({ id, type }, gate.bits);
     for (const signal of gateInputs) {
       if (!knownSignals.has(signal)) throw new Error(`Component ${id} refers to unavailable signal ${signal}. List components in dependency order.`);
     }
@@ -78,7 +97,7 @@ function validateCircuitSpec(spec) {
     gateIds.add(id);
     gateOutputs.add(output);
     knownSignals.add(output);
-    return { id, type, inputs: gateInputs, output };
+    return bits ? { id, type, inputs: gateInputs, output, bits } : { id, type, inputs: gateInputs, output };
   });
 
   for (const output of outputs) {

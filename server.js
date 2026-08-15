@@ -258,9 +258,9 @@ function maybeDiagram(text) {
 const DIAGRAM_HINT =
   '\nIf a circuit diagram is needed, give the normal written answer first, then include exactly one ```circuit JSON block. ' +
   'Use this exact shape: {"inputs":["A","B"],"outputs":["S","Cout"],"gates":[{"id":"g1","type":"xor","inputs":["A","B"],"output":"S"},{"id":"g2","type":"and","inputs":["A","B"],"output":"Cout"}]}. ' +
-  'Supported component types are and, or, not, xor, nand, nor, xnor, buffer, mux2, mux4, dff, jkff, tff, and srff. List components in dependency order; every component input must be an original input or a signal produced by an earlier component. ' +
-  'Use one input for not/buffer; two to four inputs for basic logic gates; mux2 inputs [I0,I1,S]; mux4 inputs [I0,I1,I2,I3,S0,S1]; dff inputs [D,CLK]; jkff inputs [J,K,CLK]; tff inputs [T,CLK]; and srff inputs [S,R,CLK]. ' +
-  'Use short unique signal names and output Q for flip-flops where appropriate. Do not generate timing diagrams or unsupported component types.';
+  'Supported component types are and, or, not, xor, nand, nor, xnor, buffer, mux2, mux4, dff, jkff, tff, srff, dec2_4, dec3_8, enc4_2, enc8_3, and reg. List components in dependency order; every component input must be an original input or a signal produced by an earlier component. ' +
+  'Use one input for not/buffer; two to four inputs for basic logic gates; mux2 inputs [I0,I1,S]; mux4 inputs [I0,I1,I2,I3,S0,S1]; dff inputs [D,CLK]; jkff inputs [J,K,CLK]; tff inputs [T,CLK]; srff inputs [S,R,CLK]; dec2_4 inputs [A1,A0,EN]; dec3_8 inputs [A2,A1,A0,EN]; enc4_2 inputs [D0,D1,D2,D3]; enc8_3 inputs [D0,D1,D2,D3,D4,D5,D6,D7]; and reg inputs [D_bus,CLK] plus an integer bits field from 2 to 32. ' +
+  'Use short unique signal names, model multi-bit values as named buses such as Dbus/Qbus, and output Q for flip-flops where appropriate. Do not generate timing diagrams or unsupported component types.';
 
 async function renderDiagramPng(spec) {
   const svg = await renderCircuit(spec);
