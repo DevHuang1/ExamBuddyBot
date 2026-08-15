@@ -45,3 +45,13 @@ test('rejects an unsupported gate type and missing output signal', () => {
     /Output Y is not produced/,
   );
 });
+
+test('accepts three-input combinational logic gates', () => {
+  const spec = validateCircuitSpec({
+    inputs: ['A', 'B', 'C'],
+    outputs: ['Y'],
+    gates: [{ id: 'majority', type: 'and', inputs: ['A', 'B', 'C'], output: 'Y' }],
+  });
+
+  assert.equal(spec.gates[0].inputs.length, 3);
+});

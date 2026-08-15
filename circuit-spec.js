@@ -37,9 +37,12 @@ function validateCircuitSpec(spec) {
     if (gateIds.has(id)) throw new Error(`Gate id ${id} is duplicated.`);
     if (gateOutputs.has(output) || knownSignals.has(output)) throw new Error(`Signal ${output} is duplicated.`);
 
-    const expectedInputs = type === 'not' || type === 'buffer' ? 1 : 2;
-    if (!Array.isArray(gate.inputs) || gate.inputs.length !== expectedInputs) {
-      throw new Error(`Gate ${id} requires exactly ${expectedInputs} input${expectedInputs === 1 ? '' : 's'}.`);
+    const unaryGate = type === 'not' || type === 'buffer';
+    const validInputCount = Array.isArray(gate.inputs) && (unaryGate ? gate.inputs.length === 1 : gate.inputs.length >= 2 && gate.inputs.length <= 4);
+    if (!validInputCount) {
+      throw new Error(unaryGate
+        ? `Gate ${id} requires exactly one input.`
+        : `Gate ${id} requires between two and four inputs.`);
     }
     const gateInputs = gate.inputs.map((signal, inputIndex) => identifier(signal, `Gate ${id} input ${inputIndex + 1}`));
     for (const signal of gateInputs) {

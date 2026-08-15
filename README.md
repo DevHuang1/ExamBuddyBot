@@ -8,8 +8,8 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo).
 - 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback.
-- 📖 **Citations + links** — answers cite the source PDF and page number, and include a related web link.
-- ⚙️ **Validated circuit diagrams** — for supported combinational logic-gate questions, the bot validates every signal and dependency before drawing clean gate symbols and wires. Unsupported sequential/timing circuits receive an explanation rather than an incorrect diagram.
+- 📖 **Hybrid source retrieval** — answers combine lexical matching with optional Hugging Face semantic embeddings, improving selection of relevant source passages while preserving a safe lexical fallback.
+- ⚙️ **Validated circuit diagrams** — for supported combinational logic-gate questions, the bot validates every signal and dependency before drawing clean gate symbols and wires. It supports one-input NOT/buffer gates and two- through four-input basic combinational gates. Unsupported sequential/timing circuits receive an explanation rather than an incorrect diagram.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context.
 - 🔒 **No user API keys** — only the deployment owner supplies `GROQ_API_KEY` as an environment secret; students use the bot without keys or model commands.
 
@@ -50,6 +50,10 @@ npm start
 | `MAX_SOURCES_PER_CHAT` | No | Maximum PDF/PPTX/image sources stored for one chat (default `12`) |
 | `MAX_SCANNED_PDF_PAGES` | No | Maximum image-only PDF pages processed with vision fallback (default `15`) |
 | `PDF_RENDER_DPI` | No | Rasterization quality for scanned PDF detection (default `160`) |
+| `HF_RETRIEVAL_ENABLED` | No | Enables semantic source reranking when an owner token is available (default `true`) |
+| `HF_TOKEN` | No | Owner-managed Hugging Face token with Inference Providers permission; keep it secret. Without it, lexical retrieval remains active. |
+| `HF_EMBEDDING_MODEL` | No | Hugging Face feature-extraction model used for source reranking (default `thenlper/gte-large`) |
+| `HF_INFERENCE_PROVIDER` | No | Hugging Face Inference Provider used for embeddings (default `hf-inference`) |
 | `SOURCES_FILE` | No | Optional path for persisted uploaded sources (defaults to `/data/sources.json` where available) |
 
 ## Docker
@@ -59,7 +63,7 @@ docker build -t exambuddybot .
 docker run -d --env-file .env -e PORT=8080 -p 8080:8080 exambuddybot
 ```
 
-The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. The image also includes the quiz utility module used by the source-grounded practice flow.
+The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. If `HF_TOKEN` is configured, the bot calls Hugging Face Inference Providers for semantic source retrieval; otherwise it automatically continues with lexical retrieval.
 
 ## Deploy to Railway
 

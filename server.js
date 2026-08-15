@@ -9,6 +9,7 @@ const JSZip = require('jszip');
 const { Resvg } = require('@resvg/resvg-js');
 const { renderCircuit } = require('./circuit');
 const { validateCircuitSpec } = require('./circuit-spec');
+const { SemanticReranker } = require('./semantic-reranker');
 const { normalizeQuiz, parseQuizAnswer } = require('./quiz');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
@@ -78,6 +79,16 @@ function renderScannedPdfPages(buf) {
 
 const DATA_DIR = path.join(__dirname, 'data');
 const SOURCES_FILE = resolveFile('SOURCES_FILE', 'sources.json');
+const HF_RETRIEVAL_ENABLED = process.env.HF_RETRIEVAL_ENABLED !== 'false';
+const HF_TOKEN = (process.env.HF_TOKEN || '').trim();
+const HF_EMBEDDING_MODEL = process.env.HF_EMBEDDING_MODEL || 'thenlper/gte-large';
+const HF_INFERENCE_PROVIDER = process.env.HF_INFERENCE_PROVIDER || 'hf-inference';
+const semanticReranker = new SemanticReranker({
+  enabled: HF_RETRIEVAL_ENABLED,
+  token: HF_TOKEN,
+  model: HF_EMBEDDING_MODEL,
+  provider: HF_INFERENCE_PROVIDER,
+});
 
 function resolveFile(envVar, name) {
   if (process.env[envVar]) return process.env[envVar];
@@ -248,7 +259,7 @@ const DIAGRAM_HINT =
   '\nIf a logic-gate diagram is needed, give the normal written answer first, then include exactly one ```circuit JSON block. ' +
   'Use this exact shape: {"inputs":["A","B"],"outputs":["S","Cout"],"gates":[{"id":"g1","type":"xor","inputs":["A","B"],"output":"S"},{"id":"g2","type":"and","inputs":["A","B"],"output":"Cout"}]}. ' +
   'Supported gate types are and, or, not, xor, nand, nor, xnor, and buffer. List gates in dependency order; every gate input must be an original input or a signal produced by an earlier gate. ' +
-  'Use one input for not/buffer and exactly two inputs for every other gate. Use short unique signal names. For flip-flops, multiplexers, timing diagrams, or circuits outside these basic gates, explain the design but do not include a circuit block.';
+  'Use one input for not/buffer and between two and four inputs for every other gate. Use short unique signal names. For flip-flops, multiplexers, timing diagrams, or circuits outside these basic gates, explain the design but do not include a circuit block.';
 
 async function renderDiagramPng(spec) {
   const svg = await renderCircuit(spec);
@@ -320,7 +331,7 @@ function quizMessage(quiz) {
 
 async function createQuiz(chatId, topic) {
   const store = sources.get(chatId) || { pdfs: [], images: [] };
-  const context = buildContext(store.pdfs, topic || 'practice question', MAX_SOURCE_CHARS);
+  const context = await buildContext(store.pdfs, topic || 'practice question', MAX_SOURCE_CHARS);
   if (!context) {
     await send(chatId, '📝 To create a reliable quiz, first upload a PDF or PPTX source. Then use <code>/quiz</code> or <code>/quiz &lt;topic&gt;</code>.');
     return;
@@ -419,7 +430,7 @@ function chunkLabel(s, num, chunk) {
   return `<source ${num}> ${kind} "${s.name}"\n${chunk}\n</source ${num}>`;
 }
 
-function buildContext(sources, question, maxChars) {
+async function buildContext(sources, question, maxChars) {
   const qkeys = keywordMap(question);
   const scored = [];
   sources.forEach((s, i) => {
@@ -447,16 +458,21 @@ function buildContext(sources, question, maxChars) {
     return true;
   };
 
+  const ranked = await semanticReranker.rank(question, scored);
+  const compare = (a, b) => {
+    const semanticDelta = (b.semanticScore ?? -Infinity) - (a.semanticScore ?? -Infinity);
+    return semanticDelta || b.score - a.score;
+  };
   const bySource = new Map();
-  for (const c of scored) {
+  for (const c of ranked) {
     if (!bySource.has(c.i)) bySource.set(c.i, []);
     bySource.get(c.i).push(c);
   }
   for (const list of bySource.values()) {
-    list.sort((a, b) => b.score - a.score);
+    list.sort(compare);
     addChunk(list[0]);
   }
-  const rest = [...scored].sort((a, b) => b.score - a.score);
+  const rest = [...ranked].sort(compare);
   for (const c of rest) {
     if (!addChunk(c)) break;
   }
@@ -624,7 +640,7 @@ async function handleText(chatId, text, { record = true } = {}) {
   await typing(chatId);
 
   if (usablePdfs.length || usableImages.length) {
-    const context = buildContext(usablePdfs, text, MAX_SOURCE_CHARS);
+    const context = await buildContext(usablePdfs, text, MAX_SOURCE_CHARS);
     const images = usableImages.slice(0, 4);
     const sourceCount = usablePdfs.length + usableImages.length;
     const prompt = [
@@ -902,6 +918,7 @@ async function main() {
   console.log(`🤖 ExamBuddy bot running as @${me.username}`);
   console.log(`Answer model: ${ANSWER_MODEL} | Vision model: ${VISION_MODEL}`);
   console.log(`Owner-managed Groq key: ${GROQ_API_KEY ? 'configured' : 'missing'} | ${TAVILY_API_KEY ? 'Tavily search' : 'DuckDuckGo search'}`);
+  console.log(`Hugging Face semantic retrieval: ${HF_RETRIEVAL_ENABLED && HF_TOKEN ? `${HF_EMBEDDING_MODEL} via ${HF_INFERENCE_PROVIDER}` : 'lexical fallback only'}`);
   console.log(`Source store: ${SOURCES_FILE}`);
   setInterval(poll, 1500);
   poll();

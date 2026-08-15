@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 process.env.GROQ_API_KEY = 'test-groq-key';
+process.env.HF_RETRIEVAL_ENABLED = 'false';
 
 const { handleUpdate, __test } = require('./server');
 
