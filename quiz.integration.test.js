@@ -26,8 +26,8 @@ function installFetchMock(quizPayload) {
     }
 
     if (target.includes('api.telegram.org')) {
-      const payload = options.body ? JSON.parse(options.body) : {};
-      telegramCalls.push({ url: target, payload });
+      const payload = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+      telegramCalls.push({ url: target, payload, body: options.body });
       return response({ ok: true, result: {} });
     }
 
@@ -76,6 +76,7 @@ test('responds safely to /quiz when the chat has no uploaded source', async () =
 
 test('runs the /quiz command end to end and accepts a correct Telegram answer', async () => {
   const quizPayload = {
+    status: 'ok',
     topic: 'Algebra',
     question: 'Which degree does a linear equation have?',
     choices: ['Zero', 'One', 'Two', 'Three'],
@@ -88,6 +89,8 @@ test('runs the /quiz command end to end and accepts a correct Telegram answer', 
   await handleUpdate(message('/quiz linear equations'));
 
   assert.equal(groqCalls.length, 1);
+  assert.equal(groqCalls[0].model, 'openai/gpt-oss-120b');
+  assert.equal(groqCalls[0].response_format.json_schema.strict, true);
   assert.match(groqCalls[0].messages.at(-1).content[0].text, /Requested focus: linear equations/i);
   assert.match(groqCalls[0].messages.at(-1).content[0].text, /Algebra lecture\.pdf/);
   const quizMessages = telegramMessages(telegramCalls);
@@ -106,6 +109,7 @@ test('runs the /quiz command end to end and accepts a correct Telegram answer', 
 
 test('returns the correct answer and explanation after an incorrect quiz response', async () => {
   const quizPayload = {
+    status: 'ok',
     topic: 'Algebra',
     question: 'Which degree does a linear equation have?',
     choices: ['Zero', 'One', 'Two', 'Three'],
@@ -126,6 +130,7 @@ test('returns the correct answer and explanation after an incorrect quiz respons
 
 test('surfaces a safe Telegram error when the quiz model returns malformed content', async () => {
   const { telegramCalls } = installFetchMock({
+    status: 'ok',
     topic: 'Algebra',
     question: 'Incomplete response',
     choices: ['Only one option'],
@@ -139,4 +144,71 @@ test('surfaces a safe Telegram error when the quiz model returns malformed conte
   const feedback = telegramMessages(telegramCalls).at(-1);
   assert.match(feedback, /Quiz creation failed safely/);
   assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
+});
+
+test('keeps legacy key commands safe and owner-managed', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+
+  await handleUpdate(message('/apikey arbitrary-user-key'));
+
+  assert.equal(groqCalls.length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /do not need an API key/i);
+});
+
+test('processes full-page vision input in batches of at most five images', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({
+    status: 'ok',
+    topic: 'Vision',
+    question: 'Unused quiz payload',
+    choices: ['A', 'B', 'C', 'D'],
+    answerIndex: 0,
+    explanation: 'Unused.',
+  });
+  const pages = Array.from({ length: 6 }, (_, index) => ({
+    base64: Buffer.from(`page-${index + 1}`).toString('base64'),
+    mime: 'image/png',
+  }));
+
+  await __test.answerImages(CHAT_ID, pages, 'Solve every question.');
+
+  assert.equal(groqCalls.length, 2);
+  assert.equal(groqCalls[0].model, 'qwen/qwen3.6-27b');
+  assert.equal(groqCalls[0].messages.at(-1).content.filter((item) => item.type === 'image_url').length, 5);
+  assert.equal(groqCalls[1].messages.at(-1).content.filter((item) => item.type === 'image_url').length, 1);
+  assert.match(groqCalls[0].messages.at(-1).content[0].text, /page\(s\) 1-5 of 6/i);
+  assert.match(groqCalls[1].messages.at(-1).content[0].text, /page\(s\) 6-6 of 6/i);
+  assert.match(telegramMessages(telegramCalls).at(-1), /Pages 1-5:/);
+  assert.match(telegramMessages(telegramCalls).at(-1), /Pages 6-6:/);
+});
+
+test('renders and uploads a validated circuit diagram from a model response', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const answer = [
+    'A half-adder produces a sum and carry output.',
+    '```circuit',
+    JSON.stringify({
+      inputs: ['A', 'B'],
+      outputs: ['S', 'Cout'],
+      gates: [
+        { id: 'sum', type: 'xor', inputs: ['A', 'B'], output: 'S' },
+        { id: 'carry', type: 'and', inputs: ['A', 'B'], output: 'Cout' },
+      ],
+    }),
+    '```',
+  ].join('\n');
+
+  const rendered = await __test.extractAndSendDiagram(CHAT_ID, answer);
+
+  assert.equal(rendered, true);
+  assert.equal(telegramCalls.filter((call) => call.url.includes('/sendPhoto')).length, 1);
+});
+
+test('does not upload a diagram when the circuit specification is invalid', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const answer = '```circuit\n{"inputs":["A"],"outputs":["Y"],"gates":[{"id":"bad","type":"and","inputs":["A","B"],"output":"Y"}]}\n```';
+
+  const rendered = await __test.extractAndSendDiagram(CHAT_ID, answer);
+
+  assert.equal(rendered, null);
+  assert.equal(telegramCalls.filter((call) => call.url.includes('/sendPhoto')).length, 0);
 });

@@ -3,21 +3,28 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const pdfParse = require('pdf-parse');
 const JSZip = require('jszip');
 const { Resvg } = require('@resvg/resvg-js');
 const { renderCircuit } = require('./circuit');
+const { validateCircuitSpec } = require('./circuit-spec');
 const { normalizeQuiz, parseQuizAnswer } = require('./quiz');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const GROQ_API_KEY = (process.env.GROQ_API_KEY || '').trim();
 const TAVILY_API_KEY = (process.env.TAVILY_API_KEY || '').trim();
 const FIRECRAWL_API_KEY = (process.env.FIRECRAWL_API_KEY || '').trim();
-const TEXT_MODEL = process.env.TEXT_MODEL || 'llama-3.3-70b-versatile';
+const ANSWER_MODEL = process.env.ANSWER_MODEL || 'openai/gpt-oss-120b';
 const VISION_MODEL = process.env.VISION_MODEL || 'qwen/qwen3.6-27b';
+const ANSWER_TEMPERATURE = Number(process.env.ANSWER_TEMPERATURE || '0.15');
+const MAX_COMPLETION_TOKENS = parseInt(process.env.MAX_COMPLETION_TOKENS || '4096', 10);
 const MAX_SOURCE_CHARS = parseInt(process.env.MAX_SOURCE_CHARS || '20000', 10);
 const MAX_UPLOAD_BYTES = parseInt(process.env.MAX_UPLOAD_BYTES || String(12 * 1024 * 1024), 10);
 const MAX_SOURCES_PER_CHAT = parseInt(process.env.MAX_SOURCES_PER_CHAT || '12', 10);
+const MAX_VISION_IMAGES_PER_REQUEST = 5;
+const MAX_SCANNED_PDF_PAGES = parseInt(process.env.MAX_SCANNED_PDF_PAGES || '15', 10);
+const PDF_RENDER_DPI = parseInt(process.env.PDF_RENDER_DPI || '160', 10);
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 
@@ -44,8 +51,32 @@ async function parsePptx(buf) {
   return { text: parts.join('\n\n'), pages: slideFiles.length };
 }
 
+function renderScannedPdfPages(buf) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy_pdf_'));
+  const input = path.join(dir, 'source.pdf');
+  const outputPrefix = path.join(dir, 'page');
+  try {
+    fs.writeFileSync(input, buf);
+    const result = spawnSync('pdftoppm', [
+      '-f', '1',
+      '-l', String(MAX_SCANNED_PDF_PAGES),
+      '-r', String(PDF_RENDER_DPI),
+      '-png',
+      input,
+      outputPrefix,
+    ], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+    if (result.status !== 0) throw new Error(result.stderr?.trim() || 'Unable to render the scanned PDF pages.');
+    const pages = fs.readdirSync(dir)
+      .filter((name) => /^page-\d+\.png$/.test(name))
+      .sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]))
+      .map((name) => ({ base64: fs.readFileSync(path.join(dir, name)).toString('base64'), mime: 'image/png' }));
+    return pages;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 const DATA_DIR = path.join(__dirname, 'data');
-const KEYS_FILE = resolveFile('KEYS_FILE', 'keys.json');
 const SOURCES_FILE = resolveFile('SOURCES_FILE', 'sources.json');
 
 function resolveFile(envVar, name) {
@@ -74,22 +105,46 @@ function startHealthServer() {
 }
 
 const SYSTEM_PROMPT =
-  'You are ExamBuddy, an exam-answer assistant. Answer ONLY from the uploaded lecture sources. ' +
-  'If the sources do not contain the answer, say so clearly and give the best short answer from general knowledge or web results if provided. ' +
-  'Be straight to the point: give the direct answer first, then a brief 1-3 sentence explanation. ' +
-  'Do not add fluff, disclaimers, or filler. Format with short bullet points where useful.';
+  'You are ExamBuddy, an expert exam-answer assistant. Treat uploaded lecture sources as the primary authority. ' +
+  'For source-based answers, cite the source number and page or slide where evidence appears; never invent a citation. ' +
+  'If the source does not support an answer, say that clearly before offering a carefully labelled general-knowledge or web-based explanation. ' +
+  'Solve problems step by step when reasoning is needed, preserve formulas and units, check arithmetic, and distinguish facts from assumptions. ' +
+  'Give a direct answer first, then a concise explanation. Do not add filler.';
 
 const VISION_PROMPT =
-  'You are ExamBuddy. The user forwarded one or more images containing exam questions. ' +
-  'Read every question clearly visible in the image(s) and answer each one directly. ' +
-  'Be straight to the point: give the direct answer first, then a brief 1-3 sentence explanation. ' +
-  'If any question is unreadable, say so and skip it. Format with numbered answers where there are multiple questions.';
+  'You are ExamBuddy, an expert at full-page exam-paper detection. Treat the supplied images as ordered pages. ' +
+  'Inspect each page carefully and detect every visible question number, sub-question, option, table, formula, graph, and circuit. ' +
+  'Answer every readable item in page order; preserve the original numbering and explicitly mark any unreadable or cut-off text instead of guessing. ' +
+  'For calculation questions, show the key steps and check arithmetic. For multiple-choice questions, state the selected option and explain briefly. ' +
+  'If a circuit diagram is requested and can be represented with basic logic gates, add the required circuit JSON block exactly as instructed. ' +
+  'Do not omit questions or add information that is not visible in the pages.';
 
 const QUIZ_PROMPT =
   'You create one reliable multiple-choice practice question using ONLY the provided lecture-source context. ' +
-  'Return JSON only, with exactly this shape: {"topic":"short topic","question":"question text","choices":["choice A","choice B","choice C","choice D"],"answerIndex":0,"explanation":"brief explanation grounded in the source"}. ' +
-  'Use exactly four plausible choices, put the zero-based correct choice in answerIndex, and do not mention that you are an AI. ' +
-  'If the source context is insufficient, return {"error":"insufficient_source"}.';
+  'Use exactly four plausible choices, put the zero-based correct choice in answerIndex, and write a brief explanation grounded in the source. ' +
+  'If the source context is insufficient, set status to insufficient_source and leave all question fields as empty strings or arrays. ' +
+  'Do not mention that you are an AI.';
+
+const QUIZ_RESPONSE_SCHEMA = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'exam_buddy_quiz',
+    strict: true,
+    schema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['ok', 'insufficient_source'] },
+        topic: { type: 'string' },
+        question: { type: 'string' },
+        choices: { type: 'array', items: { type: 'string' } },
+        answerIndex: { type: 'integer' },
+        explanation: { type: 'string' },
+      },
+      required: ['status', 'topic', 'question', 'choices', 'answerIndex', 'explanation'],
+      additionalProperties: false,
+    },
+  },
+};
 
 const HELP_TEXT =
   '📚 <b>ExamBuddy Bot</b>\n\n' +
@@ -100,9 +155,6 @@ const HELP_TEXT =
   '• <b>Circuit questions</b> – get a drawn diagram as an image.\n' +
   '• <b>Remembers your recent Q&amp;A</b> – follow-up questions have context.\n\n' +
   'Commands:\n' +
-  '/apikey &lt;key&gt; – set your own Groq API key\n' +
-  '/resetkey – go back to the preconfigured key\n' +
-  '/model &lt;name&gt; – set your own text model (optional)\n' +
   '/sources – list your uploaded sources\n' +
   '/quiz [topic] – create one practice question from your sources\n' +
   '/rethink – re-answer your last question\n' +
@@ -115,7 +167,6 @@ const histories = new Map(); // chatId -> [{ role: 'user'|'assistant', content }
 const lastQuestions = new Map(); // chatId -> last text question
 const activeQuizzes = new Map(); // chatId -> validated multiple-choice quiz
 const MAX_HISTORY = 10;
-let userKeys = {};         // chatId -> { groqKey, model }
 
 function getHistory(chatId) {
   return histories.get(chatId) || [];
@@ -126,23 +177,6 @@ function pushHistory(chatId, role, content) {
   h.push({ role, content });
   if (h.length > MAX_HISTORY) h.splice(0, h.length - MAX_HISTORY);
   histories.set(chatId, h);
-}
-
-function loadKeys() {
-  try {
-    if (fs.existsSync(KEYS_FILE)) userKeys = JSON.parse(fs.readFileSync(KEYS_FILE, 'utf8'));
-  } catch (err) {
-    console.error('Could not load keys file:', err.message);
-  }
-}
-
-function saveKeys() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(KEYS_FILE, JSON.stringify(userKeys, null, 2), { mode: 0o600 });
-  } catch (err) {
-    console.error('Could not save keys file:', err.message);
-  }
 }
 
 function loadSources() {
@@ -180,7 +214,8 @@ function requireConfig() {
     process.exit(1);
   }
   if (!GROQ_API_KEY) {
-    console.error('GROQ_API_KEY is missing in .env (or users must use /apikey).');
+    console.error('GROQ_API_KEY is missing. Configure the owner-managed deployment secret before starting the bot.');
+    process.exit(1);
   }
 }
 
@@ -210,10 +245,10 @@ function maybeDiagram(text) {
 }
 
 const DIAGRAM_HINT =
-  '\nIf a diagram would help answer this question, include a circuit description as JSON inside a ```circuit ... ``` code block with this exact shape: ' +
-  '{"inputs":["A","B"],"outputs":["S","Cout"],"gates":[{"id":"g1","type":"xor","inputs":["A","B"],"output":"S"},{"id":"g2","type":"and","inputs":["A","B"],"output":"Cout"}]}. ' +
-  'Gate types allowed: and, or, not, xor, nand, nor, xnor, buffer. "output" is the signal name a gate produces; signal names must be consistent, and outputs must be listed in "outputs". ' +
-  'Do not describe the diagram in words outside the block.';
+  '\nIf a logic-gate diagram is needed, give the normal written answer first, then include exactly one ```circuit JSON block. ' +
+  'Use this exact shape: {"inputs":["A","B"],"outputs":["S","Cout"],"gates":[{"id":"g1","type":"xor","inputs":["A","B"],"output":"S"},{"id":"g2","type":"and","inputs":["A","B"],"output":"Cout"}]}. ' +
+  'Supported gate types are and, or, not, xor, nand, nor, xnor, and buffer. List gates in dependency order; every gate input must be an original input or a signal produced by an earlier gate. ' +
+  'Use one input for not/buffer and exactly two inputs for every other gate. Use short unique signal names. For flip-flops, multiplexers, timing diagrams, or circuits outside these basic gates, explain the design but do not include a circuit block.';
 
 async function renderDiagramPng(spec) {
   const svg = await renderCircuit(spec);
@@ -233,8 +268,7 @@ async function extractAndSendDiagram(chatId, answer) {
   const m = answer.match(/```(?:circuit|json)\n([\s\S]*?)```/);
   if (!m) return null;
   try {
-    const spec = JSON.parse(m[1].trim());
-    if (!spec || !Array.isArray(spec.gates)) return null;
+    const spec = validateCircuitSpec(JSON.parse(m[1].trim()));
     const png = await renderDiagramPng(spec);
     if (!png) return null;
     await sendPhoto(chatId, png, '⚙️ Circuit diagram');
@@ -300,15 +334,16 @@ async function createQuiz(chatId, topic) {
   ].join('\n\n');
   const raw = await groqChat({
     chatId,
-    model: userKeys[chatId]?.model || TEXT_MODEL,
+    model: ANSWER_MODEL,
     systemPrompt: QUIZ_PROMPT,
     userText: request,
     history: [],
+    responseFormat: QUIZ_RESPONSE_SCHEMA,
   });
   let quiz;
   try {
-    const parsed = JSON.parse(String(raw).replace(/```(?:json)?\s*|\s*```/gi, ''));
-    if (parsed?.error === 'insufficient_source') throw new Error('The uploaded sources do not contain enough material for a reliable quiz on that topic.');
+    const parsed = JSON.parse(String(raw));
+    if (parsed?.status === 'insufficient_source') throw new Error('The uploaded sources do not contain enough material for a reliable quiz on that topic.');
     quiz = normalizeQuiz(parsed);
   } catch (err) {
     throw new Error(`Quiz creation failed safely: ${err.message}`);
@@ -429,22 +464,16 @@ function buildContext(sources, question, maxChars) {
   return chosen.map((c) => chunkLabel(sources[c.i], c.i + 1, c.chunk)).join('\n\n');
 }
 
-function maskKey(key) {
-  return key.length > 8 ? `${key.slice(0, 6)}…${key.slice(-4)}` : '••••••';
-}
-
-function getGroqKey(chatId) {
-  const own = userKeys[chatId]?.groqKey;
-  if (own) return { key: own, source: 'your own key' };
-  if (GROQ_API_KEY) return { key: GROQ_API_KEY, source: 'preconfigured key' };
+function getGroqKey() {
+  if (GROQ_API_KEY) return { key: GROQ_API_KEY, source: 'owner-managed deployment key' };
   return null;
 }
 
-async function groqChat({ chatId, model, systemPrompt, userText, images, history }) {
-  const keyInfo = getGroqKey(chatId);
+async function groqChat({ chatId, model, systemPrompt, userText, images, history, responseFormat }) {
+  const keyInfo = getGroqKey();
   if (!keyInfo) {
     throw new Error(
-      'No Groq API key configured. Add one in .env (GROQ_API_KEY) or set yours with /apikey &lt;key&gt;',
+      'This bot is not configured yet. The owner must add the GROQ_API_KEY deployment secret.',
     );
   }
   const content = [{ type: 'text', text: userText }];
@@ -459,8 +488,9 @@ async function groqChat({ chatId, model, systemPrompt, userText, images, history
   const body = JSON.stringify({
     model,
     messages,
-    temperature: 0.4,
-    max_completion_tokens: 2048,
+    temperature: ANSWER_TEMPERATURE,
+    max_completion_tokens: MAX_COMPLETION_TOKENS,
+    ...(responseFormat ? { response_format: responseFormat } : {}),
   });
   const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -610,7 +640,7 @@ async function handleText(chatId, text, { record = true } = {}) {
     }
     const answer = await groqChat({
       chatId,
-      model: images.length ? VISION_MODEL : (userKeys[chatId]?.model || TEXT_MODEL),
+      model: images.length ? VISION_MODEL : ANSWER_MODEL,
       systemPrompt: SYSTEM_PROMPT,
       userText: prompt,
       images,
@@ -628,7 +658,7 @@ async function handleText(chatId, text, { record = true } = {}) {
     await send(chatId, '🔎 No sources found for this chat yet – searching the web…\n(Send a PDF/PPTX or an image to add a source; check /sources.)');
     const webContext = await webSearch(text);
     const prompt = `${webContext}\n\n${maybeDiagram(text) ? DIAGRAM_HINT + '\n' : ''}Question: ${text}`;
-    const answer = await groqChat({ chatId, model: userKeys[chatId]?.model || TEXT_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
+    const answer = await groqChat({ chatId, model: ANSWER_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
     if (record) {
       pushHistory(chatId, 'user', text);
       pushHistory(chatId, 'assistant', stripDotBlock(answer));
@@ -641,13 +671,29 @@ async function handleText(chatId, text, { record = true } = {}) {
 async function answerImages(chatId, images, caption) {
   if (!images.length) return;
   const question = caption && caption.trim() ? caption.trim() : '';
-  const prompt = [
-    VISION_PROMPT,
-    question ? `\n\nAdditional context from the caption: ${question}` : '',
-  ].join('');
-  await send(chatId, `🔍 Reading ${images.length} image(s)…`);
-  const answer = await groqChat({ chatId, model: VISION_MODEL, systemPrompt: VISION_PROMPT, userText: prompt, images });
-  await sendLong(chatId, `🖼 Answered from forwarded image${images.length > 1 ? 's' : ''}\n\n`, answer);
+  const batches = [];
+  await send(chatId, `🔍 Reading ${images.length} image(s) in page order…`);
+
+  for (let start = 0; start < images.length; start += MAX_VISION_IMAGES_PER_REQUEST) {
+    const batch = images.slice(start, start + MAX_VISION_IMAGES_PER_REQUEST);
+    const end = start + batch.length;
+    const prompt = [
+      VISION_PROMPT,
+      `This request contains image page(s) ${start + 1}-${end} of ${images.length}.`,
+      question ? `Additional context from the caption: ${question}` : '',
+    ].filter(Boolean).join('\n\n');
+    const answer = await groqChat({
+      chatId,
+      model: VISION_MODEL,
+      systemPrompt: VISION_PROMPT,
+      userText: prompt,
+      images: batch,
+      history: [],
+    });
+    batches.push(images.length > MAX_VISION_IMAGES_PER_REQUEST ? `Pages ${start + 1}-${end}:\n${answer}` : answer);
+  }
+
+  await sendLong(chatId, `🖼 Answered from forwarded image${images.length > 1 ? 's' : ''}\n\n`, batches.join('\n\n'));
 }
 
 async function grabPhoto(chatId, photo) {
@@ -665,7 +711,7 @@ function scheduleAlbum(mediaGroupId) {
     if (!ready) return;
     albums.delete(mediaGroupId);
     try {
-      await answerImages(ready.chatId, ready.photos.slice(0, 6), ready.caption);
+      await answerImages(ready.chatId, ready.photos, ready.caption);
     } catch (err) {
       await send(ready.chatId, `⚠️ Error: ${escapeHtml(err.message)}`).catch(() => {});
     }
@@ -711,11 +757,21 @@ async function handleDocument(chatId, doc) {
     const isPptx = (doc.mime_type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') || lower.endsWith('.pptx');
     if (isPdf) {
       const tmp = path.join(os.tmpdir(), `exambuddy_${Date.now()}.pdf`);
-      fs.writeFileSync(tmp, buf);
-      const parsed = await pdfParse(fs.readFileSync(tmp), { pagerender: renderPage });
-      fs.unlinkSync(tmp);
-      if (!parsed.text || !parsed.text.trim()) {
-        throw new Error('No readable text found in that PDF (it may be a scanned or image-only PDF). Try sending the pages as photos instead.');
+      let parsed = null;
+      try {
+        fs.writeFileSync(tmp, buf);
+        parsed = await pdfParse(fs.readFileSync(tmp), { pagerender: renderPage });
+      } catch (err) {
+        console.warn(`Text extraction failed for ${name}; trying vision fallback:`, err.message);
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
+      if (!parsed?.text || !parsed.text.trim()) {
+        const pages = renderScannedPdfPages(buf);
+        if (!pages.length) throw new Error('No readable pages could be rendered from that PDF.');
+        await send(chatId, `📷 This is a scanned PDF, so I am reading its first ${pages.length} page(s) with full-page vision detection.`);
+        await answerImages(chatId, pages, `Scanned PDF: ${name}`);
+        return;
       }
       store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages, type: 'pdf' });
       sources.set(chatId, store);
@@ -744,36 +800,6 @@ async function handleDocument(chatId, doc) {
 
 // ---------- commands ----------
 
-async function cmdApikey(chatId, args) {
-  const key = (args || '').trim();
-  if (!key) {
-    const current = getGroqKey(chatId);
-    if (current) return send(chatId, `Current key: <b>${escapeHtml(maskKey(current.key))}</b> (${current.source})`);
-    return send(chatId, 'No key configured. Set one with <code>/apikey &lt;key&gt;</code> or add GROQ_API_KEY to .env.');
-  }
-  userKeys[chatId] = { ...(userKeys[chatId] || {}), groqKey: key };
-  saveKeys();
-  await send(chatId, `✅ Your own Groq key is set (${escapeHtml(maskKey(key))}). It is stored locally and used for all requests.`);
-}
-
-async function cmdResetkey(chatId) {
-  if (!userKeys[chatId]) return send(chatId, 'You have no custom key set.');
-  delete userKeys[chatId];
-  saveKeys();
-  await send(chatId, GROQ_API_KEY ? '↩️ Custom key removed. Using the preconfigured Groq key again.' : '↩️ Custom key removed. Set one with /apikey.');
-}
-
-async function cmdModel(chatId, args) {
-  const model = (args || '').trim();
-  if (!model) {
-    const m = userKeys[chatId]?.model || TEXT_MODEL;
-    return send(chatId, `Text model: <b>${escapeHtml(m)}</b> (set one with /model &lt;name&gt;)`);
-  }
-  userKeys[chatId] = { ...(userKeys[chatId] || {}), model };
-  saveKeys();
-  await send(chatId, `✅ Text model set to <b>${escapeHtml(model)}</b>.`);
-}
-
 // ---------- update dispatch ----------
 
 async function handleUpdate(update) {
@@ -798,14 +824,8 @@ async function handleUpdate(update) {
   if (cmd === '/help') {
     return send(chatId, HELP_TEXT);
   }
-  if (cmd === '/apikey' || cmd === '/api') {
-    return cmdApikey(chatId, args);
-  }
-  if (cmd === '/resetkey') {
-    return cmdResetkey(chatId);
-  }
-  if (cmd === '/model') {
-    return cmdModel(chatId, args);
+  if (cmd === '/apikey' || cmd === '/api' || cmd === '/resetkey' || cmd === '/model') {
+    return send(chatId, '🔒 You do not need an API key or model command. ExamBuddy uses the owner-managed high-quality model configuration.');
   }
   if (cmd === '/sources') {
     const store = sources.get(chatId) || { pdfs: [], images: [] };
@@ -876,14 +896,13 @@ async function poll() {
 
 async function main() {
   requireConfig();
-  loadKeys();
   loadSources();
   startHealthServer();
   const me = await tg('getMe', {});
   console.log(`🤖 ExamBuddy bot running as @${me.username}`);
-  console.log(`Text model: ${TEXT_MODEL} | Vision model: ${VISION_MODEL}`);
-  console.log(`Preconfigured Groq key: ${GROQ_API_KEY ? 'yes' : 'no (users must use /apikey)'} | ${TAVILY_API_KEY ? 'Tavily search' : 'DuckDuckGo search'}`);
-  console.log(`Custom keys loaded: ${Object.keys(userKeys).length} | Keys file: ${KEYS_FILE}`);
+  console.log(`Answer model: ${ANSWER_MODEL} | Vision model: ${VISION_MODEL}`);
+  console.log(`Owner-managed Groq key: ${GROQ_API_KEY ? 'configured' : 'missing'} | ${TAVILY_API_KEY ? 'Tavily search' : 'DuckDuckGo search'}`);
+  console.log(`Source store: ${SOURCES_FILE}`);
   setInterval(poll, 1500);
   poll();
 }
@@ -894,7 +913,6 @@ function resetTestState() {
   histories.clear();
   lastQuestions.clear();
   activeQuizzes.clear();
-  userKeys = {};
   offset = 0;
   polling = false;
 }
@@ -903,6 +921,8 @@ module.exports = {
   handleUpdate,
   __test: {
     activeQuizzes,
+    answerImages,
+    extractAndSendDiagram,
     resetTestState,
     sources,
   },

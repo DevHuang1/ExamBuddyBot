@@ -1,18 +1,17 @@
 # ExamBuddyBot
 
-Telegram bot that answers exam questions from forwarded images, uploaded sources (PDFs/images), or web search. Uses Groq (Llama-3.3-70B for text, Qwen 3.6 27B for vision).
+Telegram bot that answers exam questions from forwarded images, uploaded sources (PDFs/images), or web search. The deployment owner configures the model credentials once; students never need to provide API keys. It uses GPT-OSS 120B for high-quality text reasoning and Qwen 3.6 27B for vision-based page detection.
 
 ## Features
 
-- 📷 **Forward an image** (question paper, homework, notes) — read and answered directly using a vision model.
-- 📄 **Send a PDF or PPTX** — saved as a lecture source (with page/slide numbers) for answering questions.
+- 📷 **Forward images or albums** (question papers, homework, notes) — pages are processed in order, with every readable question, option, formula, table, and circuit detected.
+- 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo).
 - 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback.
 - 📖 **Citations + links** — answers cite the source PDF and page number, and include a related web link.
-- ⚙️ **Circuit diagrams** — for circuit/diagram questions the bot draws real gate symbols (AND/OR/NOT/XOR/NAND/NOR) with wires and sends the diagram as an image in chat.
-- 💬 **Conversation memory** — remembers your recent Q&A so follow-up questions have context.
-- 🔑 **Per-user Groq API keys** — optional; falls back to a preconfigured key. Keys persist to `/data/keys.json` (Railway) or local `data/` and can be cleared anytime.
-- 🧠 **Custom model** — choose your own Groq text model.
+- ⚙️ **Validated circuit diagrams** — for supported combinational logic-gate questions, the bot validates every signal and dependency before drawing clean gate symbols and wires. Unsupported sequential/timing circuits receive an explanation rather than an incorrect diagram.
+- 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context.
+- 🔒 **No user API keys** — only the deployment owner supplies `GROQ_API_KEY` as an environment secret; students use the bot without keys or model commands.
 
 ## Commands
 
@@ -20,9 +19,6 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 | --- | --- |
 | `/start` | Start the bot |
 | `/help` | Show help message |
-| `/apikey <key>` | Set your own Groq API key |
-| `/resetkey` | Go back to the preconfigured key |
-| `/model <name>` | Set your own text model (optional) |
 | `/sources` | List your uploaded PDF/PPTX/image sources |
 | `/quiz [topic]` | Create one source-grounded multiple-choice practice question; reply with A–D to answer |
 | `/rethink` | Re-answer your last question |
@@ -41,13 +37,19 @@ npm start
 | Variable | Required | Description |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
-| `GROQ_API_KEY` | Yes* | Preconfigured Groq key (*unless all users use `/apikey`) |
+| `GROQ_API_KEY` | Yes | Owner-managed Groq deployment secret; never expose or request it from students |
 | `PORT` | No | HTTP port for the health server (default `8080`) |
 | `TAVILY_API_KEY` | No | Used for web search if Firecrawl isn't set |
 | `FIRECRAWL_API_KEY` | No | If set, web search uses Firecrawl (search + scrapes the top 2 pages for real content) |
-| `MAX_SOURCE_CHARS` | No | Max chars of lecture sources sent to the model (default `20000`, to stay within Groq's free-tier TPM) |
+| `ANSWER_MODEL` | No | Owner-selected text reasoning model (default `openai/gpt-oss-120b`) |
+| `VISION_MODEL` | No | Owner-selected vision model for full-page detection (default `qwen/qwen3.6-27b`) |
+| `ANSWER_TEMPERATURE` | No | Answer determinism setting (default `0.15`) |
+| `MAX_COMPLETION_TOKENS` | No | Maximum answer length from the text model (default `4096`) |
+| `MAX_SOURCE_CHARS` | No | Max chars of lecture sources sent to the model (default `20000`) |
 | `MAX_UPLOAD_BYTES` | No | Maximum accepted upload size in bytes (default `12582912`, or 12 MB) |
 | `MAX_SOURCES_PER_CHAT` | No | Maximum PDF/PPTX/image sources stored for one chat (default `12`) |
+| `MAX_SCANNED_PDF_PAGES` | No | Maximum image-only PDF pages processed with vision fallback (default `15`) |
+| `PDF_RENDER_DPI` | No | Rasterization quality for scanned PDF detection (default `160`) |
 | `SOURCES_FILE` | No | Optional path for persisted uploaded sources (defaults to `/data/sources.json` where available) |
 
 ## Docker
