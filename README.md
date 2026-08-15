@@ -9,9 +9,26 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo).
 - 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback.
 - 📖 **Hybrid source retrieval** — answers combine lexical matching with optional Hugging Face semantic embeddings, improving selection of relevant source passages while preserving a safe lexical fallback.
-- ⚙️ **Validated circuit diagrams** — for supported combinational logic-gate questions, the bot validates every signal and dependency before drawing clean gate symbols and wires. It supports one-input NOT/buffer gates and two- through four-input basic combinational gates. Unsupported sequential/timing circuits receive an explanation rather than an incorrect diagram.
+- ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, and dependency before drawing clean symbols and wires. It supports one-input NOT/buffer gates, two- through four-input basic combinational gates, 2:1 and 4:1 multiplexers, plus D, JK, T, and SR flip-flops with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context.
 - 🔒 **No user API keys** — only the deployment owner supplies `GROQ_API_KEY` as an environment secret; students use the bot without keys or model commands.
+
+## Circuit component schema
+
+When a circuit diagram is requested, the bot can produce a validated `circuit` JSON block. The component inputs must be supplied in the listed order.
+
+| Component | `type` | Required input order |
+|---|---|---|
+| Basic logic | `and`, `or`, `xor`, `nand`, `nor`, `xnor` | 2–4 logic inputs |
+| Unary logic | `not`, `buffer` | 1 logic input |
+| Multiplexer | `mux2` | `I0`, `I1`, `S` |
+| Multiplexer | `mux4` | `I0`, `I1`, `I2`, `I3`, `S0`, `S1` |
+| Flip-flop | `dff` | `D`, `CLK` |
+| Flip-flop | `jkff` | `J`, `K`, `CLK` |
+| Flip-flop | `tff` | `T`, `CLK` |
+| Flip-flop | `srff` | `S`, `R`, `CLK` |
+
+Each component produces one named output. Sequential components use `Q` as the recommended output name; complementary outputs and timing waveforms are not yet modeled.
 
 ## Commands
 

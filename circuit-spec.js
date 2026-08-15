@@ -1,5 +1,25 @@
-const GATE_TYPES = new Set(['and', 'or', 'not', 'xor', 'nand', 'nor', 'xnor', 'buffer']);
+const GATE_TYPES = new Set([
+  'and', 'or', 'not', 'xor', 'nand', 'nor', 'xnor', 'buffer',
+  'mux2', 'mux4', 'dff', 'jkff', 'tff', 'srff',
+]);
 const SIGNAL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
+
+const COMPONENT_RULES = {
+  and: { min: 2, max: 4, label: 'logic gate' },
+  or: { min: 2, max: 4, label: 'logic gate' },
+  xor: { min: 2, max: 4, label: 'logic gate' },
+  nand: { min: 2, max: 4, label: 'logic gate' },
+  nor: { min: 2, max: 4, label: 'logic gate' },
+  xnor: { min: 2, max: 4, label: 'logic gate' },
+  not: { exact: 1, label: 'NOT gate' },
+  buffer: { exact: 1, label: 'buffer gate' },
+  mux2: { exact: 3, label: '2:1 multiplexer (I0, I1, S)' },
+  mux4: { exact: 6, label: '4:1 multiplexer (I0, I1, I2, I3, S0, S1)' },
+  dff: { exact: 2, label: 'D flip-flop (D, CLK)' },
+  jkff: { exact: 3, label: 'JK flip-flop (J, K, CLK)' },
+  tff: { exact: 2, label: 'T flip-flop (T, CLK)' },
+  srff: { exact: 3, label: 'SR flip-flop (S, R, CLK)' },
+};
 
 function identifier(value, label) {
   const text = String(value || '').trim();
@@ -16,37 +36,43 @@ function uniqueIdentifiers(values, label, min, max) {
   return normalized;
 }
 
+function validateInputCount(gate, inputs) {
+  const rule = COMPONENT_RULES[gate.type];
+  if (!rule) throw new Error(`Gate ${gate.id} uses an unsupported component type.`);
+  if (rule.exact && inputs.length !== rule.exact) {
+    throw new Error(`Gate ${gate.id} is a ${rule.label} and requires exactly ${rule.exact} inputs.`);
+  }
+  if (rule.min && (inputs.length < rule.min || inputs.length > rule.max)) {
+    throw new Error(`Gate ${gate.id} is a ${rule.label} and requires between ${rule.min} and ${rule.max} inputs.`);
+  }
+}
+
 function validateCircuitSpec(spec) {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error('Circuit data must be an object.');
 
-  const inputs = uniqueIdentifiers(spec.inputs, 'Inputs', 1, 16);
+  const inputs = uniqueIdentifiers(spec.inputs, 'Inputs', 1, 24);
   const outputs = uniqueIdentifiers(spec.outputs, 'Outputs', 1, 16);
-  if (!Array.isArray(spec.gates) || spec.gates.length < 1 || spec.gates.length > 32) {
-    throw new Error('A circuit must contain between 1 and 32 gates.');
+  if (!Array.isArray(spec.gates) || spec.gates.length < 1 || spec.gates.length > 40) {
+    throw new Error('A circuit must contain between 1 and 40 components.');
   }
 
   const knownSignals = new Set(inputs);
   const gateIds = new Set();
   const gateOutputs = new Set();
   const gates = spec.gates.map((gate, index) => {
-    if (!gate || typeof gate !== 'object' || Array.isArray(gate)) throw new Error(`Gate ${index + 1} is invalid.`);
-    const id = identifier(gate.id, `Gate ${index + 1} id`);
+    if (!gate || typeof gate !== 'object' || Array.isArray(gate)) throw new Error(`Component ${index + 1} is invalid.`);
+    const id = identifier(gate.id, `Component ${index + 1} id`);
     const type = String(gate.type || '').toLowerCase().trim();
-    const output = identifier(gate.output, `Gate ${index + 1} output`);
-    if (!GATE_TYPES.has(type)) throw new Error(`Gate ${id} uses an unsupported gate type.`);
-    if (gateIds.has(id)) throw new Error(`Gate id ${id} is duplicated.`);
+    const output = identifier(gate.output, `Component ${index + 1} output`);
+    if (!GATE_TYPES.has(type)) throw new Error(`Component ${id} uses an unsupported type.`);
+    if (gateIds.has(id)) throw new Error(`Component id ${id} is duplicated.`);
     if (gateOutputs.has(output) || knownSignals.has(output)) throw new Error(`Signal ${output} is duplicated.`);
+    if (!Array.isArray(gate.inputs)) throw new Error(`Component ${id} inputs must be an array.`);
 
-    const unaryGate = type === 'not' || type === 'buffer';
-    const validInputCount = Array.isArray(gate.inputs) && (unaryGate ? gate.inputs.length === 1 : gate.inputs.length >= 2 && gate.inputs.length <= 4);
-    if (!validInputCount) {
-      throw new Error(unaryGate
-        ? `Gate ${id} requires exactly one input.`
-        : `Gate ${id} requires between two and four inputs.`);
-    }
-    const gateInputs = gate.inputs.map((signal, inputIndex) => identifier(signal, `Gate ${id} input ${inputIndex + 1}`));
+    const gateInputs = gate.inputs.map((signal, inputIndex) => identifier(signal, `Component ${id} input ${inputIndex + 1}`));
+    validateInputCount({ id, type }, gateInputs);
     for (const signal of gateInputs) {
-      if (!knownSignals.has(signal)) throw new Error(`Gate ${id} refers to unavailable signal ${signal}. List gates in dependency order.`);
+      if (!knownSignals.has(signal)) throw new Error(`Component ${id} refers to unavailable signal ${signal}. List components in dependency order.`);
     }
 
     gateIds.add(id);
@@ -62,4 +88,4 @@ function validateCircuitSpec(spec) {
   return { inputs, outputs, gates };
 }
 
-module.exports = { GATE_TYPES, validateCircuitSpec };
+module.exports = { COMPONENT_RULES, GATE_TYPES, validateCircuitSpec };

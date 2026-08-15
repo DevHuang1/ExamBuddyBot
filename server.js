@@ -256,10 +256,11 @@ function maybeDiagram(text) {
 }
 
 const DIAGRAM_HINT =
-  '\nIf a logic-gate diagram is needed, give the normal written answer first, then include exactly one ```circuit JSON block. ' +
+  '\nIf a circuit diagram is needed, give the normal written answer first, then include exactly one ```circuit JSON block. ' +
   'Use this exact shape: {"inputs":["A","B"],"outputs":["S","Cout"],"gates":[{"id":"g1","type":"xor","inputs":["A","B"],"output":"S"},{"id":"g2","type":"and","inputs":["A","B"],"output":"Cout"}]}. ' +
-  'Supported gate types are and, or, not, xor, nand, nor, xnor, and buffer. List gates in dependency order; every gate input must be an original input or a signal produced by an earlier gate. ' +
-  'Use one input for not/buffer and between two and four inputs for every other gate. Use short unique signal names. For flip-flops, multiplexers, timing diagrams, or circuits outside these basic gates, explain the design but do not include a circuit block.';
+  'Supported component types are and, or, not, xor, nand, nor, xnor, buffer, mux2, mux4, dff, jkff, tff, and srff. List components in dependency order; every component input must be an original input or a signal produced by an earlier component. ' +
+  'Use one input for not/buffer; two to four inputs for basic logic gates; mux2 inputs [I0,I1,S]; mux4 inputs [I0,I1,I2,I3,S0,S1]; dff inputs [D,CLK]; jkff inputs [J,K,CLK]; tff inputs [T,CLK]; and srff inputs [S,R,CLK]. ' +
+  'Use short unique signal names and output Q for flip-flops where appropriate. Do not generate timing diagrams or unsupported component types.';
 
 async function renderDiagramPng(spec) {
   const svg = await renderCircuit(spec);

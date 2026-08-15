@@ -11,6 +11,8 @@ const PIN_STUB = 16;
 const INVERTED = new Set(['not', 'nand', 'nor', 'xnor']);
 const OUT_EXTRA = { and: 0, or: 0, xor: 0, buffer: 0, not: 10, nand: 10, nor: 10, xnor: 10 };
 const BACK = { or: 6, nor: 6, xor: 4, xnor: 4 };
+const MULTIPLEXERS = new Set(['mux2', 'mux4']);
+const FLIP_FLOPS = new Set(['dff', 'jkff', 'tff', 'srff']);
 
 function round(n) {
   return Math.round(n * 10) / 10;
@@ -37,6 +39,14 @@ function gateBody(type, x, y) {
     case 'not':
     case 'buffer':
       return `M ${x},${y} L ${x + W},${cy} L ${x},${y + H} Z`;
+    case 'mux2':
+    case 'mux4':
+      return `M ${x + 8},${y} L ${x + W - 8},${y + 7} L ${x + W - 8},${y + H - 7} L ${x + 8},${y + H} Z`;
+    case 'dff':
+    case 'jkff':
+    case 'tff':
+    case 'srff':
+      return `M ${x},${y} L ${x + W},${y} L ${x + W},${y + H} L ${x},${y + H} Z`;
     default:
       return `M ${x},${y} L ${x + W},${y} L ${x + W},${y + H} L ${x},${y + H} Z`;
   }
@@ -46,6 +56,41 @@ function gateExtraCurve(type, x, y) {
   const cy = y + GATE_H / 2;
   if (type === 'xor' || type === 'xnor') return `M ${x + 8},${y} Q ${x},${cy} ${x + 8},${y + GATE_H}`;
   return null;
+}
+
+function componentLabel(type) {
+  return {
+    mux2: 'MUX 2:1',
+    mux4: 'MUX 4:1',
+    dff: 'D FF',
+    jkff: 'JK FF',
+    tff: 'T FF',
+    srff: 'SR FF',
+  }[type] || '';
+}
+
+function componentClockMark(type, x, y, w = GATE_W, h = GATE_H) {
+  if (!FLIP_FLOPS.has(type)) return '';
+  const cx = x;
+  const cy = y + h * 0.75;
+  return `M ${cx},${cy - 5} L ${cx + 8},${cy} L ${cx},${cy + 5}`;
+}
+
+function componentInPin(type, x, y, w, h, idx, total) {
+  const standardY = total === 1 ? y + h / 2 : y + (h * (idx + 1)) / (total + 1);
+  if (type === 'mux2' && idx === 2) return { x: x + w * 0.52, y: y + h };
+  if (type === 'mux4' && idx >= 4) return { x: x + w * (idx === 4 ? 0.38 : 0.66), y: y + h };
+  if (FLIP_FLOPS.has(type) && idx === total - 1) return { x, y: y + h * 0.75 };
+  return { x: x + (MULTIPLEXERS.has(type) ? 8 : BACK[type] || 0), y: standardY };
+}
+
+function componentOverlay(type, x, y, w = GATE_W, h = GATE_H) {
+  const label = componentLabel(type);
+  const clock = componentClockMark(type, x, y, w, h);
+  const parts = [];
+  if (label) parts.push(`<text x="${round(x + w / 2)}" y="${round(y + h / 2 + 5)}" text-anchor="middle" fill="#1f2937">${esc(label)}</text>`);
+  if (clock) parts.push(`<path d="${clock}" fill="none" stroke="#1f2430" stroke-width="1.6"/>`);
+  return parts.join('');
 }
 
 function layout(spec) {
@@ -145,8 +190,7 @@ function layoutV2(spec) {
   const back = (t) => BACK[t] || 0;
   const inPin = (g, idx, total) => {
     const p = gatePos[g.id];
-    const cy = total === 1 ? p.cy : p.y + (GATE_H * (idx + 1)) / (total + 1);
-    return { x: p.x + back(g.type), y: cy };
+    return componentInPin(g.type, p.x, p.y, GATE_W, GATE_H, idx, total);
   };
   const outPin = (g) => {
     const p = gatePos[g.id];
@@ -269,6 +313,9 @@ function renderV2(spec) {
     if (curve) parts.push(`<path d="${curve}" fill="none" stroke="#1f2430" stroke-width="1.8"/>`);
     if (L.isInverted(g)) parts.push(`<circle cx="${round(L.bubbleX(g))}" cy="${round(L.bubbleY(g))}" r="4.4" fill="#fffdf6"/>`);
   }
+  parts.push('</g>');
+  parts.push('<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">');
+  for (const g of L.gates) parts.push(componentOverlay(g.type, L.gateX(g), L.gateY(g)));
   parts.push('</g>');
   parts.push('<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">');
   for (const t of L.inputTracks) parts.push(`<text x="${round(L.inputLabelX)}" y="${round(t.y + 5)}" text-anchor="end" fill="#1d4ed8">${esc(t.name)}</text>`);
@@ -488,8 +535,7 @@ function splineSegments(posStr, flipY) {
 
 function gatePin(gm, g, idx) {
   const n = (g.inputs || []).length;
-  const y = n === 1 ? gm.top + gm.h / 2 : gm.top + (gm.h * (idx + 1)) / (n + 1);
-  return { x: gm.left + (BACK[g.type] || 0), y };
+  return componentInPin(g.type, gm.left, gm.top, gm.w, gm.h, idx, n);
 }
 
 function producerOf(spec, signal) {
@@ -563,6 +609,9 @@ function renderGraphSvg(spec, L, built) {
     }
   }
   svg += '</g>';
+  svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">';
+  for (const m of L.gateById.values()) svg += componentOverlay(m.g.type, m.left, m.top, m.w, m.h);
+  svg += '</g>';
   svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">';
   for (const [s, p] of L.inputs) svg += `<text x="${round(p.x - 8)}" y="${round(p.y + 5)}" text-anchor="end" fill="#1d4ed8">${esc(s)}</text>`;
   for (const [o, p] of L.outputs) svg += `<text x="${round(p.x + 8)}" y="${round(p.y + 5)}" text-anchor="start" fill="#15803d">${esc(o)}</text>`;
@@ -605,8 +654,7 @@ function manhattanOutPin(m) {
 
 function manhattanInPin(m, idx) {
   const n = (m.g.inputs || []).length;
-  const y = n === 1 ? m.top + m.h / 2 : m.top + (m.h * (idx + 1)) / (n + 1);
-  return { x: m.left + (BACK[m.g.type] || 0), y };
+  return componentInPin(m.g.type, m.left, m.top, m.w, m.h, idx, n);
 }
 
 function routeManhattan(spec, L) {
@@ -895,6 +943,9 @@ function manhattanSvg(spec, L, R) {
       svg += `<circle cx="${round(m.left + m.w + tx)}" cy="${round(m.top + m.h / 2 + ty)}" r="4.6" fill="#fffdf6"/>`;
     }
   }
+  svg += '</g>';
+  svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="12" font-weight="700">';
+  for (const m of L.gateById.values()) svg += componentOverlay(m.g.type, m.left + tx, m.top + ty, m.w, m.h);
   svg += '</g>';
   svg += '<g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="15" font-weight="600">';
   for (const [s, p] of L.inputs) svg += `<text x="${round(p.x + tx - 8)}" y="${round(p.y + ty + 5)}" text-anchor="end" fill="#1d4ed8">${esc(s)}</text>`;
