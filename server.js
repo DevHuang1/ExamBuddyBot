@@ -243,6 +243,7 @@ const HELP_TEXT =
   '/remove &lt;number&gt; – delete one listed source\n' +
   '/quiz [topic] – create one practice question from your sources\n' +
   '/flashcards [topic] – create five source-grounded study cards\n' +
+  '/analytics – see your private quiz accuracy and study focus\n' +
   '/export – download your recent chat history as a text file\n' +
   '/cancel – cancel the current quiz without deleting sources\n' +
   '/rethink – re-answer your last question\n' +
@@ -254,6 +255,7 @@ const albums = new Map();  // mediaGroupId -> { chatId, photos: [{base64,mime}],
 const histories = new Map(); // chatId -> [{ role: 'user'|'assistant', content }]
 const lastQuestions = new Map(); // chatId -> last text question
 const activeQuizzes = new Map(); // chatId -> validated multiple-choice quiz
+const quizPerformance = new Map(); // chatId -> session-only quiz accuracy and topic results
 const pendingClears = new Map(); // chatId -> confirmation timer for destructive clearing
 const chatQueues = new Map(); // chatId -> Promise serializing incoming updates for that chat
 const MAX_HISTORY = 10;
@@ -281,6 +283,42 @@ function formatHistoryExport(history) {
     return `${speaker}:\n${String(entry.content || '').trim()}`;
   });
   return [...header, ...messages].join('\n\n').trim() + '\n';
+}
+
+function recordQuizPerformance(chatId, quiz, correct) {
+  const summary = quizPerformance.get(chatId) || { total: 0, correct: 0, topics: new Map() };
+  const topic = String(quiz.topic || 'Practice question').trim() || 'Practice question';
+  const topicSummary = summary.topics.get(topic) || { total: 0, correct: 0 };
+  summary.total++;
+  if (correct) summary.correct++;
+  topicSummary.total++;
+  if (correct) topicSummary.correct++;
+  summary.topics.set(topic, topicSummary);
+  quizPerformance.set(chatId, summary);
+}
+
+function formatPerformanceAnalytics(summary) {
+  if (!summary?.total) return '';
+  const accuracy = Math.round((summary.correct / summary.total) * 100);
+  const topics = [...summary.topics.entries()]
+    .map(([topic, stats]) => ({ topic, ...stats, accuracy: Math.round((stats.correct / stats.total) * 100) }))
+    .sort((left, right) => left.accuracy - right.accuracy || right.total - left.total || left.topic.localeCompare(right.topic));
+  const weakest = topics[0];
+  let recommendation = 'Keep mixing topics and use /quiz <topic> to reinforce the areas you want to practice.';
+  if (summary.total < 3) recommendation = 'Complete at least three source-grounded quizzes before relying on a topic trend.';
+  else if (weakest.accuracy < 60) recommendation = `Prioritize ${weakest.topic}: review the cited source material, then run /quiz ${weakest.topic}.`;
+  else if (weakest.accuracy < 80) recommendation = `Strengthen ${weakest.topic} with another targeted quiz before moving on.`;
+
+  const breakdown = topics
+    .map((topic) => `${topic.topic}: ${topic.correct}/${topic.total} (${topic.accuracy}%)`)
+    .join('\n');
+  return [
+    `Session quiz performance: ${summary.correct}/${summary.total} correct (${accuracy}%).`,
+    'Topic breakdown:',
+    breakdown,
+    `Adaptive study focus: ${recommendation}`,
+    'This analytics summary is private to this chat and resets when the bot restarts or you confirm /clear.',
+  ].join('\n\n');
 }
 
 function loadSources() {
@@ -597,8 +635,9 @@ async function handleQuizAnswer(chatId, answerIndex) {
   activeQuizzes.delete(chatId);
   const correct = answerIndex === quiz.answerIndex;
   const letters = ['A', 'B', 'C', 'D'];
+  recordQuizPerformance(chatId, quiz, correct);
   const result = correct ? '✅ <b>Correct.</b>' : `❌ <b>Not quite.</b> The correct answer is <b>${letters[quiz.answerIndex]}. ${escapeHtml(quiz.choices[quiz.answerIndex])}</b>.`;
-  await send(chatId, `${result}\n\n<b>Why:</b> ${escapeHtml(quiz.explanation)}\n\nUse <code>/quiz</code> for another source-grounded question.`);
+  await send(chatId, `${result}\n\n<b>Why:</b> ${escapeHtml(quiz.explanation)}\n\nUse <code>/analytics</code> to review your private quiz performance, or <code>/quiz</code> for another source-grounded question.`);
   return true;
 }
 
@@ -1177,6 +1216,11 @@ async function handleUpdate(update) {
     }
     return;
   }
+  if (cmd === '/analytics' || cmd === '/progress') {
+    const summary = quizPerformance.get(chatId);
+    if (!summary?.total) return send(chatId, 'No quiz answers recorded for this chat yet. Complete a source-grounded /quiz first.');
+    return sendLong(chatId, '📈 Your private quiz analytics\n\n', formatPerformanceAnalytics(summary));
+  }
   if (cmd === '/cancel') {
     if (!activeQuizzes.has(chatId)) return send(chatId, 'There is no active quiz to cancel.');
     activeQuizzes.delete(chatId);
@@ -1203,8 +1247,9 @@ async function handleUpdate(update) {
     histories.delete(chatId);
     lastQuestions.delete(chatId);
     activeQuizzes.delete(chatId);
+    quizPerformance.delete(chatId);
     saveSources();
-    return send(chatId, 'All sources, conversation memory, and active quiz state cleared.');
+    return send(chatId, 'All sources, conversation memory, active quiz state, and private performance analytics cleared.');
   }
   if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry' || cmd === '/pyanloke') {
     const q = lastQuestions.get(chatId);
@@ -1282,6 +1327,7 @@ function resetTestState() {
   histories.clear();
   lastQuestions.clear();
   activeQuizzes.clear();
+  quizPerformance.clear();
   for (const { timer } of pendingClears.values()) clearTimeout(timer);
   pendingClears.clear();
   chatQueues.clear();
@@ -1294,6 +1340,8 @@ module.exports = {
   __test: {
     activeQuizzes,
     answerImages,
+    formatPerformanceAnalytics,
+    quizPerformance,
     formatHistoryExport,
     histories,
     enqueueUpdate,
