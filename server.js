@@ -206,7 +206,7 @@ const HELP_TEXT =
   '/quiz [topic] – create one practice question from your sources\n' +
   '/cancel – cancel the current quiz without deleting sources\n' +
   '/rethink – re-answer your last question\n' +
-  '/clear – delete your sources and conversation memory\n' +
+  '/clear – confirm before deleting your sources and conversation memory\n' +
   '/help – this message';
 
 const sources = new Map(); // chatId -> { pdfs: [{name,text,pages}], images: [{name,base64,mime}] }
@@ -214,8 +214,10 @@ const albums = new Map();  // mediaGroupId -> { chatId, photos: [{base64,mime}],
 const histories = new Map(); // chatId -> [{ role: 'user'|'assistant', content }]
 const lastQuestions = new Map(); // chatId -> last text question
 const activeQuizzes = new Map(); // chatId -> validated multiple-choice quiz
+const pendingClears = new Map(); // chatId -> confirmation timer for destructive clearing
 const chatQueues = new Map(); // chatId -> Promise serializing incoming updates for that chat
 const MAX_HISTORY = 10;
+const CLEAR_CONFIRMATION_WINDOW_MS = 60 * 1000;
 
 function getHistory(chatId) {
   return histories.get(chatId) || [];
@@ -302,6 +304,24 @@ function removeListedSource(chatId, index) {
   activeQuizzes.delete(chatId);
   saveSources();
   return source;
+}
+
+function requestClearConfirmation(chatId) {
+  const existing = pendingClears.get(chatId);
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    const pending = pendingClears.get(chatId);
+    if (pending?.timer === timer) pendingClears.delete(chatId);
+  }, CLEAR_CONFIRMATION_WINDOW_MS);
+  pendingClears.set(chatId, { timer });
+}
+
+function cancelClearConfirmation(chatId) {
+  const pending = pendingClears.get(chatId);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingClears.delete(chatId);
+  return true;
 }
 
 function requireConfig() {
@@ -1038,6 +1058,22 @@ async function handleUpdate(update) {
     return send(chatId, 'The active quiz was cancelled. Your uploaded sources are still available.');
   }
   if (cmd === '/clear') {
+    const action = args.trim().toLowerCase();
+    if (!action) {
+      requestClearConfirmation(chatId);
+      return send(chatId, '⚠️ This will permanently delete your uploaded sources, conversation memory, and active quiz state. To continue, send <code>/clear confirm</code> within 60 seconds. Send <code>/clear cancel</code> to keep everything.');
+    }
+    if (action === 'cancel') {
+      return send(chatId, cancelClearConfirmation(chatId)
+        ? 'Clear request cancelled. Your sources and conversation memory are unchanged.'
+        : 'There is no pending clear request.');
+    }
+    if (action !== 'confirm') {
+      return send(chatId, 'Usage: <code>/clear</code>, then <code>/clear confirm</code> or <code>/clear cancel</code>.');
+    }
+    if (!cancelClearConfirmation(chatId)) {
+      return send(chatId, 'There is no pending clear request, or it expired. Send <code>/clear</code> to start again.');
+    }
     sources.delete(chatId);
     histories.delete(chatId);
     lastQuestions.delete(chatId);
@@ -1121,6 +1157,8 @@ function resetTestState() {
   histories.clear();
   lastQuestions.clear();
   activeQuizzes.clear();
+  for (const { timer } of pendingClears.values()) clearTimeout(timer);
+  pendingClears.clear();
   chatQueues.clear();
   offset = 0;
   polling = false;

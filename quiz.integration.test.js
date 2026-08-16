@@ -290,16 +290,18 @@ test('serializes updates from the same chat so replies cannot be delivered out o
 
   const first = __test.enqueueUpdate(message('/sources'));
   const second = __test.enqueueUpdate(message('/clear'));
+  const third = __test.enqueueUpdate(message('/clear confirm'));
   await firstReply;
 
   assert.equal(telegramMessagesSent.length, 1);
   assert.match(telegramMessagesSent[0], /No sources yet/);
 
   releaseFirstReply();
-  await Promise.all([first, second]);
+  await Promise.all([first, second, third]);
 
-  assert.equal(telegramMessagesSent.length, 2);
-  assert.match(telegramMessagesSent[1], /All sources, conversation memory, and active quiz state cleared/);
+  assert.equal(telegramMessagesSent.length, 3);
+  assert.match(telegramMessagesSent[1], /clear confirm/i);
+  assert.match(telegramMessagesSent[2], /All sources, conversation memory, and active quiz state cleared/);
 });
 
 
@@ -356,6 +358,47 @@ test('cancels an active quiz without clearing uploaded sources', async () => {
   assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
   assert.equal(__test.sources.has(CHAT_ID), true);
   assert.match(telegramMessages(telegramCalls).at(-1), /quiz was cancelled/i);
+});
+
+test('requires explicit confirmation before clearing sources and supports cancellation', async () => {
+  const { telegramCalls } = installFetchMock({});
+  seedSource();
+  __test.activeQuizzes.set(CHAT_ID, { question: 'An active quiz' });
+
+  await handleUpdate(message('/clear'));
+
+  assert.equal(__test.sources.has(CHAT_ID), true);
+  assert.equal(__test.activeQuizzes.has(CHAT_ID), true);
+  assert.match(telegramMessages(telegramCalls).at(-1), /clear confirm/i);
+
+  await handleUpdate(message('/clear cancel'));
+
+  assert.equal(__test.sources.has(CHAT_ID), true);
+  assert.equal(__test.activeQuizzes.has(CHAT_ID), true);
+  assert.match(telegramMessages(telegramCalls).at(-1), /Clear request cancelled/i);
+});
+
+test('clears sources only after a pending clear request is confirmed', async () => {
+  const { telegramCalls } = installFetchMock({});
+  seedSource();
+  __test.activeQuizzes.set(CHAT_ID, { question: 'An active quiz' });
+
+  await handleUpdate(message('/clear'));
+  await handleUpdate(message('/clear confirm'));
+
+  assert.equal(__test.sources.has(CHAT_ID), false);
+  assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
+  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, and active quiz state cleared/i);
+});
+
+test('does not clear sources when confirmation was not requested first', async () => {
+  const { telegramCalls } = installFetchMock({});
+  seedSource();
+
+  await handleUpdate(message('/clear confirm'));
+
+  assert.equal(__test.sources.has(CHAT_ID), true);
+  assert.match(telegramMessages(telegramCalls).at(-1), /no pending clear request/i);
 });
 
 test('splits raw text before escaping so text and special characters are preserved', () => {
