@@ -312,3 +312,56 @@ test('reports a clear error when an outbound request times out', async () => {
     /Model request timed out after 60 seconds/,
   );
 });
+
+
+test('rejects oversized text questions before calling the model', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+
+  await handleUpdate(message('x'.repeat(6001)));
+
+  assert.equal(groqCalls.length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /under 6,000 characters/i);
+});
+
+test('rejects unsupported document types before downloading or storing them', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+  const update = {
+    message: {
+      chat: { id: CHAT_ID },
+      document: {
+        file_id: 'unsupported-file',
+        file_name: 'archive.exe',
+        mime_type: 'application/octet-stream',
+        file_size: 1024,
+      },
+    },
+  };
+
+  await handleUpdate(update);
+
+  assert.equal(groqCalls.length, 0);
+  assert.equal(__test.sources.has(CHAT_ID), false);
+  assert.equal(telegramCalls.filter((call) => call.url.includes('/getFile')).length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /Unsupported file type/i);
+});
+
+test('cancels an active quiz without clearing uploaded sources', async () => {
+  const { telegramCalls } = installFetchMock({});
+  seedSource();
+  __test.activeQuizzes.set(CHAT_ID, { question: 'An active quiz' });
+
+  await handleUpdate(message('/cancel'));
+
+  assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
+  assert.equal(__test.sources.has(CHAT_ID), true);
+  assert.match(telegramMessages(telegramCalls).at(-1), /quiz was cancelled/i);
+});
+
+test('splits raw text before escaping so text and special characters are preserved', () => {
+  const input = `${'a'.repeat(3799)}&${'b'.repeat(120)}`;
+  const chunks = __test.splitMessageText(input);
+
+  assert.ok(chunks.every((chunk) => chunk.length <= 3800));
+  assert.equal(chunks.join(''), input);
+  assert.equal(chunks[0].endsWith('&'), true);
+});

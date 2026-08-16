@@ -22,7 +22,16 @@ const ANSWER_TEMPERATURE = Number(process.env.ANSWER_TEMPERATURE || '0.15');
 const MAX_COMPLETION_TOKENS = parseInt(process.env.MAX_COMPLETION_TOKENS || '4096', 10);
 const MAX_SOURCE_CHARS = parseInt(process.env.MAX_SOURCE_CHARS || '20000', 10);
 const MAX_UPLOAD_BYTES = parseInt(process.env.MAX_UPLOAD_BYTES || String(12 * 1024 * 1024), 10);
+const MAX_IMAGE_BYTES = parseInt(process.env.MAX_IMAGE_BYTES || String(6 * 1024 * 1024), 10);
+const MAX_TEXT_QUESTION_CHARS = parseInt(process.env.MAX_TEXT_QUESTION_CHARS || '6000', 10);
 const MAX_SOURCES_PER_CHAT = parseInt(process.env.MAX_SOURCES_PER_CHAT || '12', 10);
+const IMAGE_MIME_BY_EXTENSION = Object.freeze({
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+});
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(Object.values(IMAGE_MIME_BY_EXTENSION));
 const MAX_VISION_IMAGES_PER_REQUEST = 5;
 const MAX_SCANNED_PDF_PAGES = parseInt(process.env.MAX_SCANNED_PDF_PAGES || '15', 10);
 const PDF_RENDER_DPI = parseInt(process.env.PDF_RENDER_DPI || '160', 10);
@@ -171,6 +180,7 @@ const HELP_TEXT =
   '/sources – list your uploaded sources\n' +
   '/remove &lt;number&gt; – delete one listed source\n' +
   '/quiz [topic] – create one practice question from your sources\n' +
+  '/cancel – cancel the current quiz without deleting sources\n' +
   '/rethink – re-answer your last question\n' +
   '/clear – delete your sources and conversation memory\n' +
   '/help – this message';
@@ -198,10 +208,23 @@ function loadSources() {
   try {
     if (fs.existsSync(SOURCES_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(SOURCES_FILE, 'utf8'));
-      for (const [chatId, store] of Object.entries(parsed)) {
-        sources.set(Number(chatId), store);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+        throw new Error('Source store must contain a JSON object keyed by chat ID.');
       }
-      console.log(`Loaded sources from ${SOURCES_FILE}: ${Object.keys(parsed).length} chat(s) with sources.`);
+      let loaded = 0;
+      for (const [chatId, store] of Object.entries(parsed)) {
+        const numericChatId = Number(chatId);
+        if (!Number.isSafeInteger(numericChatId) || !store || typeof store !== 'object') {
+          console.warn(`Ignoring invalid saved source entry for chat ${chatId}.`);
+          continue;
+        }
+        const pdfs = Array.isArray(store.pdfs) ? store.pdfs : [];
+        const images = Array.isArray(store.images) ? store.images : [];
+        if (!pdfs.length && !images.length) continue;
+        sources.set(numericChatId, { pdfs, images });
+        loaded++;
+      }
+      console.log(`Loaded sources from ${SOURCES_FILE}: ${loaded} chat(s) with sources.`);
     } else {
       console.log(`No sources file at ${SOURCES_FILE} yet — starting fresh.`);
     }
@@ -211,14 +234,18 @@ function loadSources() {
 }
 
 function saveSources() {
+  let temporaryFile = null;
   try {
     const dir = path.dirname(SOURCES_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const obj = {};
     for (const [chatId, store] of sources) obj[chatId] = store;
-    fs.writeFileSync(SOURCES_FILE, JSON.stringify(obj), { mode: 0o600 });
+    temporaryFile = path.join(dir, `.${path.basename(SOURCES_FILE)}.${process.pid}.${Date.now()}.tmp`);
+    fs.writeFileSync(temporaryFile, JSON.stringify(obj), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(temporaryFile, SOURCES_FILE);
     console.log(`Saved sources to ${SOURCES_FILE}: ${Object.keys(obj).length} chat(s).`);
   } catch (err) {
+    if (temporaryFile) fs.rmSync(temporaryFile, { force: true });
     console.error('Could not save sources file:', err.message);
   }
 }
@@ -348,20 +375,27 @@ async function send(chatId, text) {
   });
 }
 
-async function sendLong(chatId, header, text) {
-  const escaped = escapeHtml(text);
+function splitMessageText(text, maxLength = 3800) {
   const chunks = [];
-  let rest = String(escaped);
-  while (rest.length > 3800) {
-    let cut = rest.lastIndexOf('\n', 3800);
-    if (cut < 1500) cut = 3800;
+  let rest = String(text);
+  while (rest.length > maxLength) {
+    let cut = rest.lastIndexOf('\n', maxLength);
+    if (cut < Math.floor(maxLength * 0.4)) cut = rest.lastIndexOf(' ', maxLength);
+    if (cut < Math.floor(maxLength * 0.4)) cut = maxLength;
     chunks.push(rest.slice(0, cut));
     rest = rest.slice(cut);
+    if (rest.startsWith('\n')) rest = rest.slice(1);
   }
   chunks.push(rest);
+  return chunks;
+}
+
+async function sendLong(chatId, header, text) {
+  // Escape each completed raw-text chunk. Splitting escaped HTML can sever entities such as "&amp;" and make Telegram reject the message.
+  const chunks = splitMessageText(text);
   const capped = chunks.slice(0, 8);
   for (let i = 0; i < capped.length; i++) {
-    await send(chatId, (i === 0 ? header : '') + capped[i]);
+    await send(chatId, (i === 0 ? header : '') + escapeHtml(capped[i]));
   }
   if (chunks.length > capped.length) {
     await send(chatId, '…[answer truncated, too long]');
@@ -677,6 +711,12 @@ function escapeHtml(s) {
 // ---------- handlers ----------
 
 async function handleText(chatId, text, { record = true } = {}) {
+  text = String(text || '').trim();
+  if (!text) return;
+  if (text.length > MAX_TEXT_QUESTION_CHARS) {
+    await send(chatId, `Please keep a question under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters, or upload the material as a PDF, PPTX, or image source.`);
+    return;
+  }
   const store = sources.get(chatId) || { pdfs: [], images: [] };
   const usablePdfs = store.pdfs;
   const usableImages = store.images;
@@ -757,9 +797,21 @@ async function answerImages(chatId, images, caption) {
 
 async function grabPhoto(chatId, photo) {
   const largest = photo[photo.length - 1];
+  if (largest.file_size && largest.file_size > MAX_IMAGE_BYTES) {
+    throw new Error(`That image is too large. Please send an image smaller than ${Math.floor(MAX_IMAGE_BYTES / (1024 * 1024))} MB.`);
+  }
   const buf = await downloadFile(largest.file_id);
+  if (buf.length > MAX_IMAGE_BYTES) {
+    throw new Error(`That image is too large. Please send an image smaller than ${Math.floor(MAX_IMAGE_BYTES / (1024 * 1024))} MB.`);
+  }
   const mime = largest.mime_type || 'image/jpeg';
   return { base64: buf.toString('base64'), mime };
+}
+
+function supportedImageMime(doc, lowerFileName) {
+  const declaredMime = String(doc.mime_type || '').toLowerCase();
+  if (SUPPORTED_IMAGE_MIME_TYPES.has(declaredMime)) return declaredMime;
+  return IMAGE_MIME_BY_EXTENSION[path.extname(lowerFileName)] || null;
 }
 
 function scheduleAlbum(mediaGroupId) {
@@ -801,19 +853,27 @@ async function handlePhoto(chatId, photo, caption, mediaGroupId) {
 
 async function handleDocument(chatId, doc) {
   try {
-    if (doc.file_size && doc.file_size > MAX_UPLOAD_BYTES) {
-      throw new Error(`That file is too large. Please send a file smaller than ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`);
-    }
-    const store = sources.get(chatId) || { pdfs: [], images: [] };
-    const sourceCount = store.pdfs.length + store.images.length;
-    if (sourceCount >= MAX_SOURCES_PER_CHAT) {
-      throw new Error(`You have reached the source limit (${MAX_SOURCES_PER_CHAT}). Use /clear before adding more files.`);
-    }
-    const buf = await downloadFile(doc.file_id);
     const name = doc.file_name || `doc_${Date.now()}`;
     const lower = name.toLowerCase();
     const isPdf = (doc.mime_type === 'application/pdf') || lower.endsWith('.pdf');
     const isPptx = (doc.mime_type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') || lower.endsWith('.pptx');
+    const imageMime = supportedImageMime(doc, lower);
+    if (!isPdf && !isPptx && !imageMime) {
+      throw new Error('Unsupported file type. Please send a PDF, PPTX, JPG, PNG, or WebP image.');
+    }
+    const byteLimit = imageMime ? Math.min(MAX_UPLOAD_BYTES, MAX_IMAGE_BYTES) : MAX_UPLOAD_BYTES;
+    if (doc.file_size && doc.file_size > byteLimit) {
+      throw new Error(`That file is too large. Please send a ${imageMime ? 'image' : 'file'} smaller than ${Math.floor(byteLimit / (1024 * 1024))} MB.`);
+    }
+    const store = sources.get(chatId) || { pdfs: [], images: [] };
+    const sourceCount = store.pdfs.length + store.images.length;
+    if (sourceCount >= MAX_SOURCES_PER_CHAT) {
+      throw new Error(`You have reached the source limit (${MAX_SOURCES_PER_CHAT}). Use /remove or /clear before adding more files.`);
+    }
+    const buf = await downloadFile(doc.file_id);
+    if (buf.length > byteLimit) {
+      throw new Error(`That file is too large. Please send a ${imageMime ? 'image' : 'file'} smaller than ${Math.floor(byteLimit / (1024 * 1024))} MB.`);
+    }
     if (isPdf) {
       const tmp = path.join(os.tmpdir(), `exambuddy_${Date.now()}.pdf`);
       let parsed = null;
@@ -846,8 +906,7 @@ async function handleDocument(chatId, doc) {
       saveSources();
       await send(chatId, `📊 Added "${escapeHtml(name)}" as slides source (${store.pdfs.length} source(s), ${parsed.pages} slides). Ask me a question now.`);
     } else {
-      const mime = doc.mime_type || 'image/jpeg';
-      store.images.push({ name, base64: buf.toString('base64'), mime });
+      store.images.push({ name, base64: buf.toString('base64'), mime: imageMime });
       sources.set(chatId, store);
       saveSources();
       await send(chatId, `🖼 Added "${escapeHtml(name)}" as image source (${store.images.length} image source(s)). Ask me a question now.`);
@@ -901,11 +960,19 @@ async function handleUpdate(update) {
     return send(chatId, `Removed source ${requested}: ${escapeHtml(removed.name)}. Any active quiz was reset.`);
   }
   if (cmd === '/quiz') {
+    if (args.length > MAX_TEXT_QUESTION_CHARS) {
+      return send(chatId, `Please keep the quiz topic under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters.`);
+    }
     try {
       return await createQuiz(chatId, args);
     } catch (err) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
+  }
+  if (cmd === '/cancel') {
+    if (!activeQuizzes.has(chatId)) return send(chatId, 'There is no active quiz to cancel.');
+    activeQuizzes.delete(chatId);
+    return send(chatId, 'The active quiz was cancelled. Your uploaded sources are still available.');
   }
   if (cmd === '/clear') {
     sources.delete(chatId);
@@ -1005,6 +1072,7 @@ module.exports = {
     extractAndSendDiagram,
     fetchWithTimeout,
     resetTestState,
+    splitMessageText,
     sources,
   },
 };

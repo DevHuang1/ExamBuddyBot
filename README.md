@@ -44,6 +44,7 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | `/sources` | List uploaded sources with their stable removal numbers |
 | `/remove <number>` | Delete one source from the `/sources` list and reset any active quiz |
 | `/quiz [topic]` | Create one source-grounded multiple-choice practice question; reply with A–D to answer |
+| `/cancel` | Cancel the active quiz while keeping uploaded sources |
 | `/rethink` | Re-answer your last question |
 | `/clear` | Delete your sources and conversation memory |
 
@@ -69,7 +70,9 @@ npm start
 | `ANSWER_TEMPERATURE` | No | Answer determinism setting (default `0.15`) |
 | `MAX_COMPLETION_TOKENS` | No | Maximum answer length from the text model (default `4096`) |
 | `MAX_SOURCE_CHARS` | No | Max chars of lecture sources sent to the model (default `20000`) |
-| `MAX_UPLOAD_BYTES` | No | Maximum accepted upload size in bytes (default `12582912`, or 12 MB) |
+| `MAX_UPLOAD_BYTES` | No | Maximum accepted PDF/PPTX upload size in bytes (default `12582912`, or 12 MB) |
+| `MAX_IMAGE_BYTES` | No | Maximum accepted JPG/PNG/WebP image size in bytes, including forwarded photos (default `6291456`, or 6 MB) |
+| `MAX_TEXT_QUESTION_CHARS` | No | Maximum text-question or quiz-topic length (default `6000`) |
 | `MAX_SOURCES_PER_CHAT` | No | Maximum PDF/PPTX/image sources stored for one chat (default `12`) |
 | `MAX_SCANNED_PDF_PAGES` | No | Maximum image-only PDF pages processed with vision fallback (default `15`) |
 | `PDF_RENDER_DPI` | No | Rasterization quality for scanned PDF detection (default `160`) |
@@ -87,7 +90,7 @@ docker build -t exambuddybot .
 docker run -d --env-file .env -e PORT=8080 -p 8080:8080 exambuddybot
 ```
 
-The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. If `HF_TOKEN` is configured, the bot calls Hugging Face Inference Providers for semantic source retrieval; otherwise it automatically continues with lexical retrieval.
+The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. Uploaded-source writes are performed atomically to reduce the risk of a partial source store after an interrupted save. If `HF_TOKEN` is configured, the bot calls Hugging Face Inference Providers for semantic source retrieval; otherwise it automatically continues with lexical retrieval.
 
 ## Deploy to Railway
 
