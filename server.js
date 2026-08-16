@@ -50,16 +50,36 @@ function renderPage(pageData) {
   });
 }
 
+function decodeXmlText(value) {
+  const namedEntities = { amp: '&', apos: "'", gt: '>', lt: '<', quot: '"' };
+  return String(value).replace(/&#x([0-9a-f]+);|&#(\d+);|&(amp|apos|gt|lt|quot);/gi, (match, hexadecimal, decimal, named) => {
+    if (hexadecimal || decimal) {
+      const codePoint = Number.parseInt(hexadecimal || decimal, hexadecimal ? 16 : 10);
+      return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+        ? String.fromCodePoint(codePoint)
+        : match;
+    }
+    return namedEntities[named.toLowerCase()] || match;
+  });
+}
+
 async function parsePptx(buf) {
   const zip = await JSZip.loadAsync(buf);
+  if (!zip.file('[Content_Types].xml') || !zip.file('ppt/presentation.xml')) {
+    throw new Error('This ZIP archive is not a valid PPTX presentation.');
+  }
   const slideFiles = Object.keys(zip.files)
     .filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n))
     .sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10));
+  if (!slideFiles.length) throw new Error('This PPTX does not contain any readable slides.');
+
   const parts = [];
   for (const f of slideFiles) {
     const num = parseInt(f.match(/\d+/)[0], 10);
     const xml = await zip.file(f).async('string');
-    const texts = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map((m) => m[1]).filter((t) => t.trim());
+    const texts = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)]
+      .map((m) => decodeXmlText(m[1]))
+      .filter((t) => t.trim());
     if (texts.length) parts.push(`[Slide ${num}] ${texts.join(' ')}`);
   }
   if (!parts.length) return null;
@@ -1113,6 +1133,7 @@ module.exports = {
     answerImages,
     enqueueUpdate,
     extractAndSendDiagram,
+    parsePptx,
     classifyDocumentUpload,
     detectUploadContent,
     fetchWithTimeout,

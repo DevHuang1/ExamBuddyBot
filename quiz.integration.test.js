@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const JSZip = require('jszip');
 
 process.env.GROQ_API_KEY = 'test-groq-key';
 process.env.HF_RETRIEVAL_ENABLED = 'false';
@@ -385,4 +386,32 @@ test('validates uploaded file content against the declared document type', () =>
     () => __test.validateDocumentContent(pdf, { kind: 'image', mime: 'image/png' }),
     /contents do not match its declared type/i,
   );
+});
+
+test('rejects generic ZIP archives that are claimed to be PPTX presentations', async () => {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types />');
+  zip.file('notes.txt', 'This is not a PowerPoint file.');
+  const archive = await zip.generateAsync({ type: 'nodebuffer' });
+
+  await assert.rejects(
+    () => __test.parsePptx(archive),
+    /not a valid PPTX presentation/i,
+  );
+});
+
+test('extracts decoded text from a valid PPTX slide', async () => {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types />');
+  zip.file('ppt/presentation.xml', '<p:presentation xmlns:p="p" />');
+  zip.file(
+    'ppt/slides/slide1.xml',
+    '<p:sld xmlns:p="p" xmlns:a="a"><a:t>Voltage &amp; current &#x3D; 5 &lt; 10</a:t></p:sld>',
+  );
+  const archive = await zip.generateAsync({ type: 'nodebuffer' });
+
+  const parsed = await __test.parsePptx(archive);
+
+  assert.equal(parsed.pages, 1);
+  assert.equal(parsed.text, '[Slide 1] Voltage & current = 5 < 10');
 });
