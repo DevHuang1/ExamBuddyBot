@@ -32,6 +32,10 @@ const IMAGE_MIME_BY_EXTENSION = Object.freeze({
   '.webp': 'image/webp',
 });
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(Object.values(IMAGE_MIME_BY_EXTENSION));
+const PDF_SIGNATURE = Buffer.from('%PDF-');
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+const ZIP_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 const MAX_VISION_IMAGES_PER_REQUEST = 5;
 const MAX_SCANNED_PDF_PAGES = parseInt(process.env.MAX_SCANNED_PDF_PAGES || '15', 10);
 const PDF_RENDER_DPI = parseInt(process.env.PDF_RENDER_DPI || '160', 10);
@@ -804,14 +808,54 @@ async function grabPhoto(chatId, photo) {
   if (buf.length > MAX_IMAGE_BYTES) {
     throw new Error(`That image is too large. Please send an image smaller than ${Math.floor(MAX_IMAGE_BYTES / (1024 * 1024))} MB.`);
   }
-  const mime = largest.mime_type || 'image/jpeg';
-  return { base64: buf.toString('base64'), mime };
+  const detected = detectUploadContent(buf);
+  if (detected?.kind !== 'image') {
+    throw new Error('That photo could not be verified as a supported JPG, PNG, or WebP image.');
+  }
+  return { base64: buf.toString('base64'), mime: detected.mime };
 }
 
 function supportedImageMime(doc, lowerFileName) {
   const declaredMime = String(doc.mime_type || '').toLowerCase();
   if (SUPPORTED_IMAGE_MIME_TYPES.has(declaredMime)) return declaredMime;
   return IMAGE_MIME_BY_EXTENSION[path.extname(lowerFileName)] || null;
+}
+
+function startsWith(buf, signature, offset = 0) {
+  return Buffer.isBuffer(buf) && buf.length >= offset + signature.length && buf.subarray(offset, offset + signature.length).equals(signature);
+}
+
+function detectUploadContent(buf) {
+  if (startsWith(buf, PDF_SIGNATURE)) return { kind: 'pdf' };
+  if (startsWith(buf, PNG_SIGNATURE)) return { kind: 'image', mime: 'image/png' };
+  if (startsWith(buf, JPEG_SIGNATURE)) return { kind: 'image', mime: 'image/jpeg' };
+  if (startsWith(buf, Buffer.from('RIFF')) && startsWith(buf, Buffer.from('WEBP'), 8)) return { kind: 'image', mime: 'image/webp' };
+  if (startsWith(buf, ZIP_SIGNATURE)) return { kind: 'zip' };
+  return null;
+}
+
+function classifyDocumentUpload(doc, lowerFileName) {
+  const declaredMime = String(doc.mime_type || '').toLowerCase();
+  if (declaredMime === 'application/pdf' || (!declaredMime && lowerFileName.endsWith('.pdf'))) return { kind: 'pdf' };
+  if (declaredMime === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || (!declaredMime && lowerFileName.endsWith('.pptx'))) return { kind: 'pptx' };
+  const imageMime = supportedImageMime(doc, lowerFileName);
+  if (imageMime) return { kind: 'image', mime: imageMime };
+  if (declaredMime === 'application/octet-stream') {
+    if (lowerFileName.endsWith('.pdf')) return { kind: 'pdf' };
+    if (lowerFileName.endsWith('.pptx')) return { kind: 'pptx' };
+  }
+  return null;
+}
+
+function validateDocumentContent(buf, upload) {
+  const detected = detectUploadContent(buf);
+  const accepted = (upload.kind === 'pdf' && detected?.kind === 'pdf') ||
+    (upload.kind === 'pptx' && detected?.kind === 'zip') ||
+    (upload.kind === 'image' && detected?.kind === 'image' && detected.mime === upload.mime);
+  if (!accepted) {
+    throw new Error('This file’s contents do not match its declared type. Please send a valid PDF, PPTX, JPG, PNG, or WebP file.');
+  }
+  return detected;
 }
 
 function scheduleAlbum(mediaGroupId) {
@@ -855,15 +899,13 @@ async function handleDocument(chatId, doc) {
   try {
     const name = doc.file_name || `doc_${Date.now()}`;
     const lower = name.toLowerCase();
-    const isPdf = (doc.mime_type === 'application/pdf') || lower.endsWith('.pdf');
-    const isPptx = (doc.mime_type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') || lower.endsWith('.pptx');
-    const imageMime = supportedImageMime(doc, lower);
-    if (!isPdf && !isPptx && !imageMime) {
+    const upload = classifyDocumentUpload(doc, lower);
+    if (!upload) {
       throw new Error('Unsupported file type. Please send a PDF, PPTX, JPG, PNG, or WebP image.');
     }
-    const byteLimit = imageMime ? Math.min(MAX_UPLOAD_BYTES, MAX_IMAGE_BYTES) : MAX_UPLOAD_BYTES;
+    const byteLimit = upload.kind === 'image' ? Math.min(MAX_UPLOAD_BYTES, MAX_IMAGE_BYTES) : MAX_UPLOAD_BYTES;
     if (doc.file_size && doc.file_size > byteLimit) {
-      throw new Error(`That file is too large. Please send a ${imageMime ? 'image' : 'file'} smaller than ${Math.floor(byteLimit / (1024 * 1024))} MB.`);
+      throw new Error(`That file is too large. Please send a ${upload.kind === 'image' ? 'image' : 'file'} smaller than ${Math.floor(byteLimit / (1024 * 1024))} MB.`);
     }
     const store = sources.get(chatId) || { pdfs: [], images: [] };
     const sourceCount = store.pdfs.length + store.images.length;
@@ -872,9 +914,10 @@ async function handleDocument(chatId, doc) {
     }
     const buf = await downloadFile(doc.file_id);
     if (buf.length > byteLimit) {
-      throw new Error(`That file is too large. Please send a ${imageMime ? 'image' : 'file'} smaller than ${Math.floor(byteLimit / (1024 * 1024))} MB.`);
+      throw new Error(`That file is too large. Please send a ${upload.kind === 'image' ? 'image' : 'file'} smaller than ${Math.floor(byteLimit / (1024 * 1024))} MB.`);
     }
-    if (isPdf) {
+    validateDocumentContent(buf, upload);
+    if (upload.kind === 'pdf') {
       const tmp = path.join(os.tmpdir(), `exambuddy_${Date.now()}.pdf`);
       let parsed = null;
       try {
@@ -896,7 +939,7 @@ async function handleDocument(chatId, doc) {
       sources.set(chatId, store);
       saveSources();
       await send(chatId, `📄 Added "${escapeHtml(name)}" as PDF source (${store.pdfs.length} PDF source(s)). Ask me a question now.`);
-    } else if (isPptx) {
+    } else if (upload.kind === 'pptx') {
       const parsed = await parsePptx(buf);
       if (!parsed || !parsed.text.trim()) {
         throw new Error('No readable text found in that PPTX (it may be image-only slides).');
@@ -906,7 +949,7 @@ async function handleDocument(chatId, doc) {
       saveSources();
       await send(chatId, `📊 Added "${escapeHtml(name)}" as slides source (${store.pdfs.length} source(s), ${parsed.pages} slides). Ask me a question now.`);
     } else {
-      store.images.push({ name, base64: buf.toString('base64'), mime: imageMime });
+      store.images.push({ name, base64: buf.toString('base64'), mime: upload.mime });
       sources.set(chatId, store);
       saveSources();
       await send(chatId, `🖼 Added "${escapeHtml(name)}" as image source (${store.images.length} image source(s)). Ask me a question now.`);
@@ -1070,8 +1113,11 @@ module.exports = {
     answerImages,
     enqueueUpdate,
     extractAndSendDiagram,
+    classifyDocumentUpload,
+    detectUploadContent,
     fetchWithTimeout,
     resetTestState,
+    validateDocumentContent,
     splitMessageText,
     sources,
   },

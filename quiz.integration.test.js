@@ -365,3 +365,24 @@ test('splits raw text before escaping so text and special characters are preserv
   assert.equal(chunks.join(''), input);
   assert.equal(chunks[0].endsWith('&'), true);
 });
+
+
+test('validates uploaded file content against the declared document type', () => {
+  const pdf = Buffer.from('%PDF-1.7\nvalid test file');
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]);
+
+  assert.deepEqual(
+    __test.classifyDocumentUpload({ mime_type: 'application/octet-stream' }, 'lecture.pdf'),
+    { kind: 'pdf' },
+  );
+  assert.deepEqual(__test.detectUploadContent(pdf), { kind: 'pdf' });
+  assert.deepEqual(__test.detectUploadContent(png), { kind: 'image', mime: 'image/png' });
+  assert.deepEqual(__test.detectUploadContent(webp), { kind: 'image', mime: 'image/webp' });
+  assert.doesNotThrow(() => __test.validateDocumentContent(pdf, { kind: 'pdf' }));
+  assert.doesNotThrow(() => __test.validateDocumentContent(png, { kind: 'image', mime: 'image/png' }));
+  assert.throws(
+    () => __test.validateDocumentContent(pdf, { kind: 'image', mime: 'image/png' }),
+    /contents do not match its declared type/i,
+  );
+});
