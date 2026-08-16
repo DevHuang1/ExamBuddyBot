@@ -37,6 +37,27 @@ function normalizeQuiz(value) {
   return { question, choices, answerIndex, explanation, topic };
 }
 
+function normalizeFlashcards(value) {
+  const raw = typeof value === 'string' ? extractJsonObject(value) : value;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('The flashcard generator returned an invalid response.');
+  }
+
+  const topic = cleanText(raw.topic, 160) || 'Study review';
+  const cards = Array.isArray(raw.cards) ? raw.cards.map((card) => ({
+    front: cleanText(card?.front, 500),
+    back: cleanText(card?.back, 1000),
+    source: cleanText(card?.source, 240),
+  })) : [];
+  const hasSourceCitation = (source) => /(?:PDF|Slides)\s+\d+.*(?:page|slide)\s+\d+/i.test(source);
+
+  if (cards.length !== 5 || cards.some((card) => !card.front || !card.back || !hasSourceCitation(card.source))) {
+    throw new Error('The flashcard generator returned incomplete or uncited cards.');
+  }
+
+  return { topic, cards };
+}
+
 function parseQuizAnswer(value) {
   const text = String(value || '').trim().toUpperCase();
   const letter = text.match(/^([A-D])(?:[.)\s]|$)/);
@@ -46,4 +67,4 @@ function parseQuizAnswer(value) {
   return null;
 }
 
-module.exports = { extractJsonObject, normalizeQuiz, parseQuizAnswer };
+module.exports = { extractJsonObject, normalizeFlashcards, normalizeQuiz, parseQuizAnswer };

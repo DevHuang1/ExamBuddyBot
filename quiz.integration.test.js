@@ -109,6 +109,57 @@ test('runs the /quiz command end to end and accepts a correct Telegram answer', 
   assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
 });
 
+test('responds safely to /flashcards when the chat has no uploaded source', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+
+  await handleUpdate(message('/flashcards algebra'));
+
+  assert.equal(groqCalls.length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /first upload a PDF or PPTX source/i);
+});
+
+test('generates five source-cited flashcards from uploaded sources', async () => {
+  const flashcardPayload = {
+    status: 'ok',
+    topic: 'Algebra',
+    cards: Array.from({ length: 5 }, (_, index) => ({
+      front: `Algebra concept ${index + 1}?`,
+      back: `Explanation ${index + 1}.`,
+      source: 'PDF 1, page 1',
+    })),
+  };
+  const { telegramCalls, groqCalls } = installFetchMock(flashcardPayload);
+  seedSource();
+
+  await handleUpdate(message('/flashcards linear equations'));
+
+  assert.equal(groqCalls.length, 1);
+  assert.equal(groqCalls[0].model, 'openai/gpt-oss-120b');
+  assert.equal(groqCalls[0].response_format.json_schema.name, 'exam_buddy_flashcards');
+  assert.match(groqCalls[0].messages[0].content, /untrusted reference data/i);
+  assert.match(groqCalls[0].messages.at(-1).content[0].text, /Requested focus: linear equations/i);
+  assert.match(groqCalls[0].messages.at(-1).content[0].text, /Algebra lecture\.pdf/);
+  const output = telegramMessages(telegramCalls).at(-1);
+  assert.match(output, /Flashcards from your sources/);
+  assert.match(output, /Flashcards: Algebra/);
+  assert.match(output, /Front: Algebra concept 1/);
+  assert.match(output, /Source: PDF 1, page 1/);
+});
+
+test('rejects malformed flashcard output without sending uncited cards', async () => {
+  const { telegramCalls } = installFetchMock({
+    status: 'ok',
+    topic: 'Algebra',
+    cards: [{ front: 'Only card', back: 'Not enough cards', source: 'PDF 1, page 1' }],
+  });
+  seedSource();
+
+  await handleUpdate(message('/flashcards algebra'));
+
+  assert.match(telegramMessages(telegramCalls).at(-1), /Flashcard creation failed safely/i);
+  assert.doesNotMatch(telegramMessages(telegramCalls).at(-1), /Front: Only card/);
+});
+
 test('returns the correct answer and explanation after an incorrect quiz response', async () => {
   const quizPayload = {
     status: 'ok',
