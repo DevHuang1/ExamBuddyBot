@@ -352,7 +352,7 @@ test('serializes updates from the same chat so replies cannot be delivered out o
 
   assert.equal(telegramMessagesSent.length, 3);
   assert.match(telegramMessagesSent[1], /clear confirm/i);
-  assert.match(telegramMessagesSent[2], /All sources, conversation memory, and active quiz state cleared/);
+  assert.match(telegramMessagesSent[2], /All sources, conversation memory, active quiz state, and private performance analytics cleared/);
 });
 
 
@@ -439,7 +439,8 @@ test('clears sources only after a pending clear request is confirmed', async () 
 
   assert.equal(__test.sources.has(CHAT_ID), false);
   assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
-  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, and active quiz state cleared/i);
+  assert.equal(__test.quizPerformance.has(CHAT_ID), false);
+  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, active quiz state, and private performance analytics cleared/i);
 });
 
 test('does not clear sources when confirmation was not requested first', async () => {
@@ -541,4 +542,46 @@ test('does not create a document when there is no chat history to export', async
 
   assert.equal(telegramCalls.filter((call) => call.url.includes('/sendDocument')).length, 0);
   assert.match(telegramMessages(telegramCalls).at(-1), /no recent chat history to export/i);
+});
+
+
+test('reports safely when analytics are requested before any quiz answers', async () => {
+  const { telegramCalls } = installFetchMock({});
+
+  await handleUpdate(message('/analytics'));
+
+  assert.match(telegramMessages(telegramCalls).at(-1), /No quiz answers recorded for this chat yet/i);
+});
+
+test('tracks quiz performance privately and recommends the weakest topic after enough answers', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const quiz = (topic) => ({
+    topic,
+    question: `Question about ${topic}`,
+    choices: ['A', 'B', 'C', 'D'],
+    answerIndex: 0,
+    explanation: `Explanation for ${topic}.`,
+  });
+
+  __test.activeQuizzes.set(CHAT_ID, quiz('Algebra'));
+  await handleUpdate(message('A'));
+  __test.activeQuizzes.set(CHAT_ID, quiz('Algebra'));
+  await handleUpdate(message('A'));
+  __test.activeQuizzes.set(CHAT_ID, quiz('Geometry'));
+  await handleUpdate(message('B'));
+  __test.quizPerformance.set(9999, {
+    total: 9,
+    correct: 9,
+    topics: new Map([['Private other-chat topic', { total: 9, correct: 9 }]]),
+  });
+
+  await handleUpdate(message('/analytics'));
+
+  const output = telegramMessages(telegramCalls).at(-1);
+  assert.match(output, /Your private quiz analytics/);
+  assert.match(output, /Session quiz performance: 2\/3 correct \(67%\)/);
+  assert.match(output, /Algebra: 2\/2 \(100%\)/);
+  assert.match(output, /Geometry: 0\/1 \(0%\)/);
+  assert.match(output, /Prioritize Geometry/);
+  assert.doesNotMatch(output, /Private other-chat topic/);
 });
