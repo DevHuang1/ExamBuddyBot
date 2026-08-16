@@ -6,11 +6,11 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 
 - 📷 **Forward images or albums** (question papers, homework, notes) — pages are processed in order, with every readable question, option, formula, table, and circuit detected.
 - 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches.
-- ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo).
+- ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo) only when no sources are present. Source-backed questions stay source-only and are not sent to a search engine.
 - 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback.
-- 📖 **Hybrid source retrieval** — answers combine lexical matching with optional Hugging Face semantic embeddings, improving selection of relevant source passages while preserving a safe lexical fallback.
+- 📖 **Hybrid source retrieval** — answers combine lexical matching with optional Hugging Face semantic embeddings, improving selection of relevant source passages while preserving a safe lexical fallback. Source material is treated as reference data, never as bot instructions.
 - ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, bit width, and dependency before drawing clean symbols and wires. It supports basic logic, 2:1 and 4:1 multiplexers, D/JK/T/SR flip-flops, 2-to-4 and 3-to-8 decoders, 4-to-2 and 8-to-3 encoders, plus configurable 2–32 bit registers with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
-- 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context.
+- 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context, while per-chat update processing keeps rapid messages and replies in order.
 - 🔒 **No user API keys** — only the deployment owner supplies `GROQ_API_KEY` as an environment secret; students use the bot without keys or model commands.
 
 ## Circuit component schema
@@ -41,7 +41,8 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | --- | --- |
 | `/start` | Start the bot |
 | `/help` | Show help message |
-| `/sources` | List your uploaded PDF/PPTX/image sources |
+| `/sources` | List uploaded sources with their stable removal numbers |
+| `/remove <number>` | Delete one source from the `/sources` list and reset any active quiz |
 | `/quiz [topic]` | Create one source-grounded multiple-choice practice question; reply with A–D to answer |
 | `/rethink` | Re-answer your last question |
 | `/clear` | Delete your sources and conversation memory |
@@ -72,6 +73,7 @@ npm start
 | `MAX_SOURCES_PER_CHAT` | No | Maximum PDF/PPTX/image sources stored for one chat (default `12`) |
 | `MAX_SCANNED_PDF_PAGES` | No | Maximum image-only PDF pages processed with vision fallback (default `15`) |
 | `PDF_RENDER_DPI` | No | Rasterization quality for scanned PDF detection (default `160`) |
+| `REQUEST_TIMEOUT_MS` | No | Maximum wait for Telegram, model, and search requests before returning a clear error (default `60000`) |
 | `HF_RETRIEVAL_ENABLED` | No | Enables semantic source reranking when an owner token is available (default `true`) |
 | `HF_TOKEN` | No | Owner-managed Hugging Face token with Inference Providers permission; keep it secret. Without it, lexical retrieval remains active. |
 | `HF_EMBEDDING_MODEL` | No | Hugging Face feature-extraction model used for source reranking (default `thenlper/gte-large`) |

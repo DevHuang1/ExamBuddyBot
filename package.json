@@ -1,7 +1,7 @@
 {
   "name": "exambuddybot",
   "version": "1.0.0",
-  "description": "ExamBuddy Telegram bot: answer exam questions from forwarded images, uploaded sources, or web search. Groq preconfigured, with optional per-user API keys.",
+  "description": "ExamBuddy Telegram bot for source-grounded exam help from images, PDFs, PPTX files, and web search when no sources are available. Uses owner-managed Groq credentials.",
   "main": "server.js",
   "type": "commonjs",
   "engines": {
