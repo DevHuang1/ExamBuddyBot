@@ -243,6 +243,7 @@ const HELP_TEXT =
   '/remove &lt;number&gt; – delete one listed source\n' +
   '/quiz [topic] – create one practice question from your sources\n' +
   '/flashcards [topic] – create five source-grounded study cards\n' +
+  '/export – download your recent chat history as a text file\n' +
   '/cancel – cancel the current quiz without deleting sources\n' +
   '/rethink – re-answer your last question\n' +
   '/clear – confirm before deleting your sources and conversation memory\n' +
@@ -267,6 +268,19 @@ function pushHistory(chatId, role, content) {
   h.push({ role, content });
   if (h.length > MAX_HISTORY) h.splice(0, h.length - MAX_HISTORY);
   histories.set(chatId, h);
+}
+
+function formatHistoryExport(history) {
+  const entries = Array.isArray(history) ? history : [];
+  const header = [
+    'ExamBuddy recent chat history',
+    `This export contains up to the last ${MAX_HISTORY} retained messages in this chat.`,
+  ];
+  const messages = entries.map((entry) => {
+    const speaker = entry.role === 'assistant' ? 'ExamBuddy' : 'You';
+    return `${speaker}:\n${String(entry.content || '').trim()}`;
+  });
+  return [...header, ...messages].join('\n\n').trim() + '\n';
 }
 
 function loadSources() {
@@ -403,6 +417,16 @@ async function sendPhoto(chatId, png, caption) {
   const res = await fetchWithTimeout(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form }, 'Telegram sendPhoto');
   const data = await res.json();
   if (!data.ok) throw new Error(data.description || 'sendPhoto failed');
+}
+
+async function sendDocument(chatId, content, fileName, caption) {
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('document', new Blob([content], { type: 'text/plain;charset=utf-8' }), fileName);
+  if (caption) form.append('caption', caption);
+  const res = await fetchWithTimeout(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, { method: 'POST', body: form }, 'Telegram sendDocument');
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.description || 'sendDocument failed');
 }
 
 function maybeDiagram(text) {
@@ -1143,6 +1167,16 @@ async function handleUpdate(update) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
   }
+  if (cmd === '/export' || cmd === '/history') {
+    const history = getHistory(chatId);
+    if (!history.length) return send(chatId, 'There is no recent chat history to export yet. Ask a question first.');
+    try {
+      await sendDocument(chatId, formatHistoryExport(history), 'exambuddy-chat-history.txt', 'Your recent ExamBuddy chat history.');
+    } catch (err) {
+      await send(chatId, `⚠️ Could not export chat history: ${escapeHtml(err.message)}`).catch(() => {});
+    }
+    return;
+  }
   if (cmd === '/cancel') {
     if (!activeQuizzes.has(chatId)) return send(chatId, 'There is no active quiz to cancel.');
     activeQuizzes.delete(chatId);
@@ -1260,6 +1294,8 @@ module.exports = {
   __test: {
     activeQuizzes,
     answerImages,
+    formatHistoryExport,
+    histories,
     enqueueUpdate,
     extractAndSendDiagram,
     parsePptx,

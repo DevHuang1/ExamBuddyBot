@@ -509,3 +509,36 @@ test('extracts decoded text from a valid PPTX slide', async () => {
   assert.equal(parsed.pages, 1);
   assert.equal(parsed.text, '[Slide 1] Voltage & current = 5 < 10');
 });
+
+
+test('exports only the requesting chat’s retained history as a text document', async () => {
+  const { telegramCalls } = installFetchMock({});
+  __test.histories.set(CHAT_ID, [
+    { role: 'user', content: 'What is a linear equation?' },
+    { role: 'assistant', content: 'It is an equation with degree one.' },
+  ]);
+  __test.histories.set(9999, [{ role: 'user', content: 'Private message from another chat.' }]);
+
+  await handleUpdate(message('/export'));
+
+  const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+  assert.ok(exportCall);
+  assert.equal(exportCall.body.get('chat_id'), String(CHAT_ID));
+  assert.equal(exportCall.body.get('caption'), 'Your recent ExamBuddy chat history.');
+  const document = exportCall.body.get('document');
+  assert.equal(document.name, 'exambuddy-chat-history.txt');
+  const text = await document.text();
+  assert.match(text, /ExamBuddy recent chat history/);
+  assert.match(text, /You:\nWhat is a linear equation\?/);
+  assert.match(text, /ExamBuddy:\nIt is an equation with degree one\./);
+  assert.doesNotMatch(text, /Private message from another chat/);
+});
+
+test('does not create a document when there is no chat history to export', async () => {
+  const { telegramCalls } = installFetchMock({});
+
+  await handleUpdate(message('/export'));
+
+  assert.equal(telegramCalls.filter((call) => call.url.includes('/sendDocument')).length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /no recent chat history to export/i);
+});
