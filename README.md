@@ -84,6 +84,7 @@ npm start
 | `HF_INFERENCE_PROVIDER` | No | Hugging Face Inference Provider used for embeddings (default `hf-inference`) |
 | `FUZZY_RETRIEVAL_FALLBACK_ENABLED` | No | Enables local typo-tolerant source matching when remote embeddings are unavailable (default `true`); set `false` for lexical-only fallback. |
 | `SOURCES_FILE` | No | Optional path for persisted uploaded sources (defaults to `/data/sources.json` where available) |
+| `UPDATE_OFFSET_FILE` | No | Optional path for the persisted Telegram update checkpoint, preventing already-seen updates from being reprocessed after a restart (defaults to `/data/update-offset.json` where available) |
 
 ## Docker
 
@@ -92,7 +93,7 @@ docker build -t exambuddybot .
 docker run -d --env-file .env -e PORT=8080 -p 8080:8080 exambuddybot
 ```
 
-The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. Uploaded-source writes are performed atomically to reduce the risk of a partial source store after an interrupted save. If `HF_TOKEN` is configured, the bot first calls Hugging Face Inference Providers for semantic source retrieval; when no token is configured or the remote provider fails, it uses local typo-tolerant matching without an additional dependency or external source-text request.
+The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. Uploaded-source writes and the Telegram update checkpoint are performed atomically, reducing the risk of partial state after an interrupted save and preventing already-seen updates from being reprocessed after a restart. If `HF_TOKEN` is configured, the bot first calls Hugging Face Inference Providers for semantic source retrieval; when no token is configured or the remote provider fails, it uses local typo-tolerant matching without an additional dependency or external source-text request.
 
 ## Deploy to Railway
 

@@ -113,6 +113,7 @@ function renderScannedPdfPages(buf) {
 
 const DATA_DIR = path.join(__dirname, 'data');
 const SOURCES_FILE = resolveFile('SOURCES_FILE', 'sources.json');
+const UPDATE_OFFSET_FILE = resolveFile('UPDATE_OFFSET_FILE', 'update-offset.json');
 const HF_RETRIEVAL_ENABLED = process.env.HF_RETRIEVAL_ENABLED !== 'false';
 const HF_TOKEN = (process.env.HF_TOKEN || '').trim();
 const HF_EMBEDDING_MODEL = process.env.HF_EMBEDDING_MODEL || 'thenlper/gte-large';
@@ -366,6 +367,42 @@ function saveSources() {
   } catch (err) {
     if (temporaryFile) fs.rmSync(temporaryFile, { force: true });
     console.error('Could not save sources file:', err.message);
+  }
+}
+
+function loadUpdateOffset(filePath = UPDATE_OFFSET_FILE) {
+  try {
+    if (!fs.existsSync(filePath)) return 0;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const savedOffset = parsed?.offset;
+    if (!Number.isSafeInteger(savedOffset) || savedOffset < 0) {
+      throw new Error('Update offset must be a non-negative safe integer.');
+    }
+    return savedOffset;
+  } catch (err) {
+    console.error(`Could not load update offset from ${filePath}:`, err.message);
+    return 0;
+  }
+}
+
+function saveUpdateOffset(nextOffset, filePath = UPDATE_OFFSET_FILE) {
+  if (!Number.isSafeInteger(nextOffset) || nextOffset < 0) {
+    console.error('Could not save update offset: value must be a non-negative safe integer.');
+    return false;
+  }
+
+  let temporaryFile = null;
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    temporaryFile = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+    fs.writeFileSync(temporaryFile, JSON.stringify({ offset: nextOffset }), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(temporaryFile, filePath);
+    return true;
+  } catch (err) {
+    if (temporaryFile) fs.rmSync(temporaryFile, { force: true });
+    console.error(`Could not save update offset to ${filePath}:`, err.message);
+    return false;
   }
 }
 
@@ -1299,7 +1336,15 @@ async function poll() {
   try {
     const updates = await tg('getUpdates', { offset, timeout: 30 });
     for (const update of updates) {
-      offset = update.update_id + 1;
+      const updateId = update?.update_id;
+      if (!Number.isSafeInteger(updateId) || updateId < 0) {
+        console.warn('Ignoring Telegram update with an invalid update_id.');
+        continue;
+      }
+      const nextOffset = updateId + 1;
+      if (nextOffset <= offset) continue;
+      offset = nextOffset;
+      saveUpdateOffset(offset);
       enqueueUpdate(update).catch(() => {});
     }
   } catch (err) {
@@ -1312,6 +1357,7 @@ async function poll() {
 async function main() {
   requireConfig();
   loadSources();
+  offset = loadUpdateOffset();
   startHealthServer();
   const me = await tg('getMe', {});
   console.log(`🤖 ExamBuddy bot running as @${me.username}`);
@@ -1319,6 +1365,7 @@ async function main() {
   console.log(`Owner-managed Groq key: ${GROQ_API_KEY ? 'configured' : 'missing'} | ${TAVILY_API_KEY ? 'Tavily search' : 'DuckDuckGo search'}`);
   console.log(`Semantic retrieval: ${HF_RETRIEVAL_ENABLED && HF_TOKEN ? `${HF_EMBEDDING_MODEL} via ${HF_INFERENCE_PROVIDER}, then ${FUZZY_RETRIEVAL_FALLBACK_ENABLED ? 'local fuzzy fallback' : 'lexical fallback'}` : HF_RETRIEVAL_ENABLED && FUZZY_RETRIEVAL_FALLBACK_ENABLED ? 'local fuzzy semantic fallback' : 'lexical fallback only'}`);
   console.log(`Source store: ${SOURCES_FILE}`);
+  console.log(`Telegram update checkpoint: ${UPDATE_OFFSET_FILE} (starting offset ${offset})`);
   setInterval(poll, 1500);
   poll();
 }
@@ -1352,6 +1399,8 @@ module.exports = {
     classifyDocumentUpload,
     detectUploadContent,
     fetchWithTimeout,
+    loadUpdateOffset,
+    saveUpdateOffset,
     resetTestState,
     validateDocumentContent,
     splitMessageText,

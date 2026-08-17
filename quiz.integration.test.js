@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const JSZip = require('jszip');
 
 process.env.GROQ_API_KEY = 'test-groq-key';
@@ -64,6 +67,25 @@ function seedSource() {
 test.afterEach(() => {
   __test.resetTestState();
   global.fetch = originalFetch;
+});
+
+test('persists and restores the Telegram update checkpoint atomically', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy-offset-'));
+  const checkpoint = path.join(dir, 'update-offset.json');
+  try {
+    assert.equal(__test.loadUpdateOffset(checkpoint), 0);
+    assert.equal(__test.saveUpdateOffset(913, checkpoint), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(checkpoint, 'utf8')), { offset: 913 });
+    assert.equal(__test.loadUpdateOffset(checkpoint), 913);
+
+    assert.equal(__test.saveUpdateOffset(-1, checkpoint), false);
+    assert.equal(__test.loadUpdateOffset(checkpoint), 913);
+
+    fs.writeFileSync(checkpoint, '{"offset":"invalid"}');
+    assert.equal(__test.loadUpdateOffset(checkpoint), 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('responds safely to /quiz when the chat has no uploaded source', async () => {
