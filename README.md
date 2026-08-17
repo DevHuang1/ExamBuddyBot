@@ -8,7 +8,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo) only when no sources are present. Source-backed questions stay source-only and are not sent to a search engine.
 - 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback.
-- 📖 **Hybrid source retrieval** — answers combine lexical matching with optional Hugging Face semantic embeddings, improving selection of relevant source passages while preserving a safe lexical fallback. Source material is treated as reference data, never as bot instructions.
+- 📖 **Resilient source retrieval** — answers use Hugging Face semantic embeddings when an owner token is configured, then fall back to local typo-tolerant fuzzy matching without sending source text to another provider. Lexical ranking remains available as an explicit opt-out fallback. Source material is treated as reference data, never as bot instructions.
 - ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, bit width, and dependency before drawing clean symbols and wires. It supports basic logic, 2:1 and 4:1 multiplexers, D/JK/T/SR flip-flops, 2-to-4 and 3-to-8 decoders, 4-to-2 and 8-to-3 encoders, plus configurable 2–32 bit registers with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context, while per-chat update processing keeps rapid messages and replies in order.
 - 🛡️ **Verified uploads** — PDF, PPTX, JPG, PNG, and WebP uploads are checked against their file signatures before parsing or storage, so mislabeled content is rejected safely.
@@ -78,10 +78,11 @@ npm start
 | `MAX_SCANNED_PDF_PAGES` | No | Maximum image-only PDF pages processed with vision fallback (default `15`) |
 | `PDF_RENDER_DPI` | No | Rasterization quality for scanned PDF detection (default `160`) |
 | `REQUEST_TIMEOUT_MS` | No | Maximum wait for Telegram, model, and search requests before returning a clear error (default `60000`) |
-| `HF_RETRIEVAL_ENABLED` | No | Enables semantic source reranking when an owner token is available (default `true`) |
-| `HF_TOKEN` | No | Owner-managed Hugging Face token with Inference Providers permission; keep it secret. Without it, lexical retrieval remains active. |
+| `HF_RETRIEVAL_ENABLED` | No | Enables semantic source reranking (default `true`) |
+| `HF_TOKEN` | No | Owner-managed Hugging Face token with Inference Providers permission; keep it secret. When absent or unavailable, the bot uses local fuzzy source matching by default. |
 | `HF_EMBEDDING_MODEL` | No | Hugging Face feature-extraction model used for source reranking (default `thenlper/gte-large`) |
 | `HF_INFERENCE_PROVIDER` | No | Hugging Face Inference Provider used for embeddings (default `hf-inference`) |
+| `FUZZY_RETRIEVAL_FALLBACK_ENABLED` | No | Enables local typo-tolerant source matching when remote embeddings are unavailable (default `true`); set `false` for lexical-only fallback. |
 | `SOURCES_FILE` | No | Optional path for persisted uploaded sources (defaults to `/data/sources.json` where available) |
 
 ## Docker
@@ -91,7 +92,7 @@ docker build -t exambuddybot .
 docker run -d --env-file .env -e PORT=8080 -p 8080:8080 exambuddybot
 ```
 
-The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. Uploaded-source writes are performed atomically to reduce the risk of a partial source store after an interrupted save. If `HF_TOKEN` is configured, the bot calls Hugging Face Inference Providers for semantic source retrieval; otherwise it automatically continues with lexical retrieval.
+The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. Uploaded-source writes are performed atomically to reduce the risk of a partial source store after an interrupted save. If `HF_TOKEN` is configured, the bot first calls Hugging Face Inference Providers for semantic source retrieval; when no token is configured or the remote provider fails, it uses local typo-tolerant matching without an additional dependency or external source-text request.
 
 ## Deploy to Railway
 

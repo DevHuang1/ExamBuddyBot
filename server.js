@@ -117,11 +117,13 @@ const HF_RETRIEVAL_ENABLED = process.env.HF_RETRIEVAL_ENABLED !== 'false';
 const HF_TOKEN = (process.env.HF_TOKEN || '').trim();
 const HF_EMBEDDING_MODEL = process.env.HF_EMBEDDING_MODEL || 'thenlper/gte-large';
 const HF_INFERENCE_PROVIDER = process.env.HF_INFERENCE_PROVIDER || 'hf-inference';
+const FUZZY_RETRIEVAL_FALLBACK_ENABLED = process.env.FUZZY_RETRIEVAL_FALLBACK_ENABLED !== 'false';
 const semanticReranker = new SemanticReranker({
   enabled: HF_RETRIEVAL_ENABLED,
   token: HF_TOKEN,
   model: HF_EMBEDDING_MODEL,
   provider: HF_INFERENCE_PROVIDER,
+  localFallbackEnabled: FUZZY_RETRIEVAL_FALLBACK_ENABLED,
 });
 
 function resolveFile(envVar, name) {
@@ -1315,7 +1317,7 @@ async function main() {
   console.log(`🤖 ExamBuddy bot running as @${me.username}`);
   console.log(`Answer model: ${ANSWER_MODEL} | Vision model: ${VISION_MODEL}`);
   console.log(`Owner-managed Groq key: ${GROQ_API_KEY ? 'configured' : 'missing'} | ${TAVILY_API_KEY ? 'Tavily search' : 'DuckDuckGo search'}`);
-  console.log(`Hugging Face semantic retrieval: ${HF_RETRIEVAL_ENABLED && HF_TOKEN ? `${HF_EMBEDDING_MODEL} via ${HF_INFERENCE_PROVIDER}` : 'lexical fallback only'}`);
+  console.log(`Semantic retrieval: ${HF_RETRIEVAL_ENABLED && HF_TOKEN ? `${HF_EMBEDDING_MODEL} via ${HF_INFERENCE_PROVIDER}, then ${FUZZY_RETRIEVAL_FALLBACK_ENABLED ? 'local fuzzy fallback' : 'lexical fallback'}` : HF_RETRIEVAL_ENABLED && FUZZY_RETRIEVAL_FALLBACK_ENABLED ? 'local fuzzy semantic fallback' : 'lexical fallback only'}`);
   console.log(`Source store: ${SOURCES_FILE}`);
   setInterval(poll, 1500);
   poll();
