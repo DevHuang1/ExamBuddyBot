@@ -664,3 +664,64 @@ test('isolates each group participant’s sources and study state', async () => 
   assert.equal(__test.activeQuizzes.has(bobKey), true);
   assert.equal(__test.quizPerformance.has(bobKey), true);
 });
+
+
+test('delivers a group participant’s history export only to their private chat', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const aliceKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/export').message);
+  const bobKey = __test.studySessionKey(groupMessage(GROUP_BOB_ID, '/export').message);
+  __test.histories.set(aliceKey, [{ role: 'user', content: 'Alice private revision question' }]);
+  __test.histories.set(bobKey, [{ role: 'user', content: 'Bob private revision question' }]);
+
+  await handleUpdate(groupMessage(GROUP_ALICE_ID, '/export'));
+
+  const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+  assert.ok(exportCall);
+  assert.equal(exportCall.body.get('chat_id'), String(GROUP_ALICE_ID));
+  const documentText = await exportCall.body.get('document').text();
+  assert.match(documentText, /Alice private revision question/);
+  assert.doesNotMatch(documentText, /Bob private revision question/);
+
+  const groupMessages = telegramCalls
+    .filter((call) => call.url.includes('/sendMessage') && call.payload.chat_id === GROUP_CHAT_ID)
+    .map((call) => call.payload.text);
+  assert.equal(groupMessages.length, 1);
+  assert.match(groupMessages[0], /sent to you in a private chat/i);
+});
+
+test('delivers group analytics only to the requesting participant’s private chat', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const aliceKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/analytics').message);
+  const bobKey = __test.studySessionKey(groupMessage(GROUP_BOB_ID, '/analytics').message);
+  __test.quizPerformance.set(aliceKey, {
+    total: 3,
+    correct: 2,
+    topics: new Map([
+      ['Biology', { total: 2, correct: 2 }],
+      ['Physics', { total: 1, correct: 0 }],
+    ]),
+  });
+  __test.quizPerformance.set(bobKey, {
+    total: 1,
+    correct: 0,
+    topics: new Map([['Chemistry', { total: 1, correct: 0 }]]),
+  });
+
+  await handleUpdate(groupMessage(GROUP_ALICE_ID, '/analytics'));
+
+  const privateAnalytics = telegramCalls.find((call) =>
+    call.url.includes('/sendMessage') && call.payload.chat_id === GROUP_ALICE_ID && /Your quiz analytics/.test(call.payload.text),
+  );
+  assert.ok(privateAnalytics);
+  assert.match(privateAnalytics.payload.text, /Session quiz performance: 2\/3 correct \(67%\)/);
+  assert.match(privateAnalytics.payload.text, /Biology: 2\/2 \(100%\)/);
+  assert.match(privateAnalytics.payload.text, /Physics: 0\/1 \(0%\)/);
+  assert.doesNotMatch(privateAnalytics.payload.text, /Chemistry/);
+
+  const groupMessages = telegramCalls
+    .filter((call) => call.url.includes('/sendMessage') && call.payload.chat_id === GROUP_CHAT_ID)
+    .map((call) => call.payload.text);
+  assert.equal(groupMessages.length, 1);
+  assert.match(groupMessages[0], /sent to you in a private chat/i);
+  assert.doesNotMatch(groupMessages[0], /Session quiz performance|Biology|Physics/);
+});

@@ -11,7 +11,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📖 **Resilient source retrieval** — answers use Hugging Face semantic embeddings when an owner token is configured, then fall back to local typo-tolerant fuzzy matching without sending source text to another provider. Lexical ranking remains available as an explicit opt-out fallback. Source material is treated as reference data, never as bot instructions.
 - ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, bit width, and dependency before drawing clean symbols and wires. It supports basic logic, 2:1 and 4:1 multiplexers, D/JK/T/SR flip-flops, 2-to-4 and 3-to-8 decoders, 4-to-2 and 8-to-3 encoders, plus configurable 2–32 bit registers with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context, while per-chat update processing keeps rapid messages and replies in order.
-- 👥 **Group-safe workspaces** — in groups and supergroups, every participant has separate sources, recent history, quiz state, and analytics. Bot replies remain visible to the group, as Telegram group messages normally do.
+- 👥 **Group-safe workspaces** — in groups and supergroups, every participant has separate sources, recent history, quiz state, and analytics. General bot replies remain visible to the group, while history exports and analytics are sent only to the requesting member’s private chat.
 - 🛡️ **Verified uploads** — PDF, PPTX, JPG, PNG, and WebP uploads are checked against their file signatures before parsing or storage, so mislabeled content is rejected safely.
 - 🔒 **No user API keys** — only the deployment owner supplies `GROQ_API_KEY` as an environment secret; students use the bot without keys or model commands.
 
@@ -46,9 +46,12 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | `/sources` | List uploaded sources with their stable removal numbers |
 | `/remove <number>` | Delete one source from the `/sources` list and reset any active quiz |
 | `/quiz [topic]` | Create one source-grounded multiple-choice practice question; reply with A–D to answer |
+| `/flashcards [topic]` | Create five source-grounded study cards |
+| `/analytics` | Show private quiz accuracy and recommended study focus; in groups, delivered to the requester’s private chat |
+| `/export` | Download your recent chat history as a text file; in groups, delivered to the requester’s private chat |
 | `/cancel` | Cancel the active quiz while keeping uploaded sources |
 | `/rethink` | Re-answer your last question |
-| `/clear` | Delete your sources and conversation memory |
+| `/clear` | Confirm before deleting your sources, conversation memory, and quiz state |
 
 ## Local Setup
 

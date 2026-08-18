@@ -265,12 +265,20 @@ const chatQueues = new Map(); // chatId -> Promise serializing incoming updates 
 const MAX_HISTORY = 10;
 const CLEAR_CONFIRMATION_WINDOW_MS = 60 * 1000;
 
+function isGroupChat(msg) {
+  return msg?.chat?.type === 'group' || msg?.chat?.type === 'supergroup';
+}
+
+function groupMemberId(msg) {
+  const userId = msg?.from?.id;
+  return Number.isSafeInteger(userId) ? userId : null;
+}
+
 function studySessionKey(msg) {
   const chatId = msg?.chat?.id;
   if (!Number.isSafeInteger(chatId)) return null;
-  const isGroupChat = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
-  const userId = msg.from?.id;
-  if (isGroupChat && Number.isSafeInteger(userId)) return `group:${chatId}:user:${userId}`;
+  const userId = groupMemberId(msg);
+  if (isGroupChat(msg) && userId !== null) return `group:${chatId}:user:${userId}`;
   return chatId;
 }
 
@@ -1271,17 +1279,42 @@ async function handleUpdate(update) {
   if (cmd === '/export' || cmd === '/history') {
     const history = getHistory(sessionKey);
     if (!history.length) return send(chatId, 'There is no recent chat history to export yet. Ask a question first.');
+    const privateRecipientId = isGroupChat(msg) ? groupMemberId(msg) : null;
+    if (isGroupChat(msg) && privateRecipientId === null) {
+      return send(chatId, 'I could not verify a member to receive this private history export. Please try again from your private chat with me.');
+    }
     try {
-      await sendDocument(chatId, formatHistoryExport(history), 'exambuddy-chat-history.txt', 'Your recent ExamBuddy chat history.');
+      await sendDocument(privateRecipientId ?? chatId, formatHistoryExport(history), 'exambuddy-chat-history.txt', 'Your recent ExamBuddy chat history.');
+      if (privateRecipientId !== null) {
+        await send(chatId, 'Your recent ExamBuddy chat history was sent to you in a private chat.');
+      }
     } catch (err) {
-      await send(chatId, `⚠️ Could not export chat history: ${escapeHtml(err.message)}`).catch(() => {});
+      const detail = privateRecipientId !== null
+        ? 'I could not send that export privately. Start a private chat with me using /start, then retry /export here.'
+        : `Could not export chat history: ${escapeHtml(err.message)}`;
+      await send(chatId, `⚠️ ${detail}`).catch(() => {});
     }
     return;
   }
   if (cmd === '/analytics' || cmd === '/progress') {
     const summary = quizPerformance.get(sessionKey);
     if (!summary?.total) return send(chatId, 'No quiz answers recorded for your ExamBuddy workspace yet. Complete a source-grounded /quiz first.');
-    return sendLong(chatId, '📈 Your quiz analytics\n\n', formatPerformanceAnalytics(summary));
+    const privateRecipientId = isGroupChat(msg) ? groupMemberId(msg) : null;
+    if (isGroupChat(msg) && privateRecipientId === null) {
+      return send(chatId, 'I could not verify a member to receive these private analytics. Please try again from your private chat with me.');
+    }
+    try {
+      await sendLong(privateRecipientId ?? chatId, '📈 Your quiz analytics\n\n', formatPerformanceAnalytics(summary));
+      if (privateRecipientId !== null) {
+        await send(chatId, 'Your private quiz analytics were sent to you in a private chat.');
+      }
+    } catch (err) {
+      const detail = privateRecipientId !== null
+        ? 'I could not send those analytics privately. Start a private chat with me using /start, then retry /analytics here.'
+        : `Could not send quiz analytics: ${escapeHtml(err.message)}`;
+      await send(chatId, `⚠️ ${detail}`).catch(() => {});
+    }
+    return;
   }
   if (cmd === '/cancel') {
     if (!activeQuizzes.has(sessionKey)) return send(chatId, 'There is no active quiz to cancel.');
@@ -1412,6 +1445,8 @@ module.exports = {
   __test: {
     activeQuizzes,
     answerImages,
+    groupMemberId,
+    isGroupChat,
     formatPerformanceAnalytics,
     quizPerformance,
     formatHistoryExport,
