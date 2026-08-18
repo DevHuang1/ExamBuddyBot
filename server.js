@@ -240,7 +240,8 @@ const HELP_TEXT =
   '• <b>Send a text question</b> – answered from your sources, or from the web.\n' +
   '• <b>Source-grounded quizzes and flashcards</b> – upload a PDF/PPTX, then use /quiz or /flashcards.\n' +
   '• <b>Circuit questions</b> – get a drawn diagram as an image.\n' +
-  '• <b>Remembers your recent Q&amp;A</b> – follow-up questions have context.\n\n' +
+  '• <b>Remembers your recent Q&amp;A</b> – follow-up questions have context.\n' +
+  '• <b>Group workspaces</b> – each participant keeps separate sources, history, quizzes, and analytics. Replies still appear in the group.\n\n' +
   'Commands:\n' +
   '/sources – list your uploaded sources\n' +
   '/remove &lt;number&gt; – delete one listed source\n' +
@@ -253,16 +254,36 @@ const HELP_TEXT =
   '/clear – confirm before deleting your sources and conversation memory\n' +
   '/help – this message';
 
-const sources = new Map(); // chatId -> { pdfs: [{name,text,pages}], images: [{name,base64,mime}] }
+const sources = new Map(); // sessionKey -> { pdfs: [{name,text,pages}], images: [{name,base64,mime}] }
 const albums = new Map();  // mediaGroupId -> { chatId, photos: [{base64,mime}], timer }
-const histories = new Map(); // chatId -> [{ role: 'user'|'assistant', content }]
-const lastQuestions = new Map(); // chatId -> last text question
-const activeQuizzes = new Map(); // chatId -> validated multiple-choice quiz
-const quizPerformance = new Map(); // chatId -> session-only quiz accuracy and topic results
-const pendingClears = new Map(); // chatId -> confirmation timer for destructive clearing
+const histories = new Map(); // sessionKey -> [{ role: 'user'|'assistant', content }]
+const lastQuestions = new Map(); // sessionKey -> last text question
+const activeQuizzes = new Map(); // sessionKey -> validated multiple-choice quiz
+const quizPerformance = new Map(); // sessionKey -> session-only quiz accuracy and topic results
+const pendingClears = new Map(); // sessionKey -> confirmation timer for destructive clearing
 const chatQueues = new Map(); // chatId -> Promise serializing incoming updates for that chat
 const MAX_HISTORY = 10;
 const CLEAR_CONFIRMATION_WINDOW_MS = 60 * 1000;
+
+function studySessionKey(msg) {
+  const chatId = msg?.chat?.id;
+  if (!Number.isSafeInteger(chatId)) return null;
+  const isGroupChat = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+  const userId = msg.from?.id;
+  if (isGroupChat && Number.isSafeInteger(userId)) return `group:${chatId}:user:${userId}`;
+  return chatId;
+}
+
+function normalizeStoredSessionKey(value) {
+  const raw = String(value || '');
+  if (/^-?\d+$/.test(raw)) {
+    const numeric = Number(raw);
+    return Number.isSafeInteger(numeric) ? numeric : null;
+  }
+  const match = raw.match(/^group:(-?\d+):user:(\d+)$/);
+  if (!match) return null;
+  return Number.isSafeInteger(Number(match[1])) && Number.isSafeInteger(Number(match[2])) ? raw : null;
+}
 
 function getHistory(chatId) {
   return histories.get(chatId) || [];
@@ -320,7 +341,7 @@ function formatPerformanceAnalytics(summary) {
     'Topic breakdown:',
     breakdown,
     `Adaptive study focus: ${recommendation}`,
-    'This analytics summary is private to this chat and resets when the bot restarts or you confirm /clear.',
+    'This analytics summary belongs to your ExamBuddy workspace and resets when the bot restarts or you confirm /clear.',
   ].join('\n\n');
 }
 
@@ -332,16 +353,16 @@ function loadSources() {
         throw new Error('Source store must contain a JSON object keyed by chat ID.');
       }
       let loaded = 0;
-      for (const [chatId, store] of Object.entries(parsed)) {
-        const numericChatId = Number(chatId);
-        if (!Number.isSafeInteger(numericChatId) || !store || typeof store !== 'object') {
-          console.warn(`Ignoring invalid saved source entry for chat ${chatId}.`);
+      for (const [storedKey, store] of Object.entries(parsed)) {
+        const sessionKey = normalizeStoredSessionKey(storedKey);
+        if (sessionKey === null || !store || typeof store !== 'object') {
+          console.warn(`Ignoring invalid saved source entry for workspace ${storedKey}.`);
           continue;
         }
         const pdfs = Array.isArray(store.pdfs) ? store.pdfs : [];
         const images = Array.isArray(store.images) ? store.images : [];
         if (!pdfs.length && !images.length) continue;
-        sources.set(numericChatId, { pdfs, images });
+        sources.set(sessionKey, { pdfs, images });
         loaded++;
       }
       console.log(`Loaded sources from ${SOURCES_FILE}: ${loaded} chat(s) with sources.`);
@@ -601,8 +622,8 @@ function flashcardText(flashcards) {
   return `Flashcards: ${flashcards.topic}\n\n${cards.join('\n\n')}`;
 }
 
-async function createQuiz(chatId, topic) {
-  const store = sources.get(chatId) || { pdfs: [], images: [] };
+async function createQuiz(chatId, topic, sessionKey = chatId) {
+  const store = sources.get(sessionKey) || { pdfs: [], images: [] };
   const context = await buildContext(store.pdfs, topic || 'practice question', MAX_SOURCE_CHARS);
   if (!context) {
     await send(chatId, '📝 To create a reliable quiz, first upload a PDF or PPTX source. Then use <code>/quiz</code> or <code>/quiz &lt;topic&gt;</code>.');
@@ -631,12 +652,12 @@ async function createQuiz(chatId, topic) {
   } catch (err) {
     throw new Error(`Quiz creation failed safely: ${err.message}`);
   }
-  activeQuizzes.set(chatId, quiz);
+  activeQuizzes.set(sessionKey, quiz);
   await send(chatId, quizMessage(quiz));
 }
 
-async function createFlashcards(chatId, topic) {
-  const store = sources.get(chatId) || { pdfs: [], images: [] };
+async function createFlashcards(chatId, topic, sessionKey = chatId) {
+  const store = sources.get(sessionKey) || { pdfs: [], images: [] };
   const context = await buildContext(store.pdfs, topic || 'a broad review of the uploaded sources', MAX_SOURCE_CHARS);
   if (!context) {
     await send(chatId, '🗂 To create reliable flashcards, first upload a PDF or PPTX source. Then use <code>/flashcards</code> or <code>/flashcards &lt;topic&gt;</code>.');
@@ -668,15 +689,15 @@ async function createFlashcards(chatId, topic) {
   await sendLong(chatId, '🗂 Flashcards from your sources\n\n', flashcardText(flashcards));
 }
 
-async function handleQuizAnswer(chatId, answerIndex) {
-  const quiz = activeQuizzes.get(chatId);
+async function handleQuizAnswer(chatId, answerIndex, sessionKey = chatId) {
+  const quiz = activeQuizzes.get(sessionKey);
   if (!quiz) return false;
-  activeQuizzes.delete(chatId);
+  activeQuizzes.delete(sessionKey);
   const correct = answerIndex === quiz.answerIndex;
   const letters = ['A', 'B', 'C', 'D'];
-  recordQuizPerformance(chatId, quiz, correct);
+  recordQuizPerformance(sessionKey, quiz, correct);
   const result = correct ? '✅ <b>Correct.</b>' : `❌ <b>Not quite.</b> The correct answer is <b>${letters[quiz.answerIndex]}. ${escapeHtml(quiz.choices[quiz.answerIndex])}</b>.`;
-  await send(chatId, `${result}\n\n<b>Why:</b> ${escapeHtml(quiz.explanation)}\n\nUse <code>/analytics</code> to review your private quiz performance, or <code>/quiz</code> for another source-grounded question.`);
+  await send(chatId, `${result}\n\n<b>Why:</b> ${escapeHtml(quiz.explanation)}\n\nUse <code>/analytics</code> to review your quiz performance, or <code>/quiz</code> for another source-grounded question.`);
   return true;
 }
 
@@ -937,18 +958,18 @@ function escapeHtml(s) {
 
 // ---------- handlers ----------
 
-async function handleText(chatId, text, { record = true } = {}) {
+async function handleText(chatId, text, { record = true, sessionKey = chatId } = {}) {
   text = String(text || '').trim();
   if (!text) return;
   if (text.length > MAX_TEXT_QUESTION_CHARS) {
     await send(chatId, `Please keep a question under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters, or upload the material as a PDF, PPTX, or image source.`);
     return;
   }
-  const store = sources.get(chatId) || { pdfs: [], images: [] };
+  const store = sources.get(sessionKey) || { pdfs: [], images: [] };
   const usablePdfs = store.pdfs;
   const usableImages = store.images;
 
-  lastQuestions.set(chatId, text);
+  lastQuestions.set(sessionKey, text);
   await typing(chatId);
 
   if (usablePdfs.length || usableImages.length) {
@@ -972,11 +993,11 @@ async function handleText(chatId, text, { record = true } = {}) {
       systemPrompt: SYSTEM_PROMPT,
       userText: prompt,
       images,
-      history: getHistory(chatId),
+      history: getHistory(sessionKey),
     });
     if (record) {
-      pushHistory(chatId, 'user', text);
-      pushHistory(chatId, 'assistant', stripDotBlock(answer));
+      pushHistory(sessionKey, 'user', text);
+      pushHistory(sessionKey, 'assistant', stripDotBlock(answer));
     }
     await sendLong(chatId, `📚 Answered from ${sourceCount} source(s)\n\n`, stripDotBlock(answer));
     await extractAndSendDiagram(chatId, answer);
@@ -984,10 +1005,10 @@ async function handleText(chatId, text, { record = true } = {}) {
     await send(chatId, '🔎 No sources found for this chat yet – searching the web…\n(Send a PDF/PPTX or an image to add a source; check /sources.)');
     const webContext = await webSearch(text);
     const prompt = `${webContext}\n\n${maybeDiagram(text) ? DIAGRAM_HINT + '\n' : ''}Question: ${text}`;
-    const answer = await groqChat({ chatId, model: ANSWER_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(chatId) });
+    const answer = await groqChat({ chatId, model: ANSWER_MODEL, systemPrompt: SYSTEM_PROMPT, userText: prompt, history: getHistory(sessionKey) });
     if (record) {
-      pushHistory(chatId, 'user', text);
-      pushHistory(chatId, 'assistant', stripDotBlock(answer));
+      pushHistory(sessionKey, 'user', text);
+      pushHistory(sessionKey, 'assistant', stripDotBlock(answer));
     }
     await sendLong(chatId, '🌐 Web answer (no sources uploaded)\n\n', stripDotBlock(answer));
     await extractAndSendDiagram(chatId, answer);
@@ -1118,7 +1139,7 @@ async function handlePhoto(chatId, photo, caption, mediaGroupId) {
   }
 }
 
-async function handleDocument(chatId, doc) {
+async function handleDocument(chatId, doc, sessionKey = chatId) {
   try {
     const name = doc.file_name || `doc_${Date.now()}`;
     const lower = name.toLowerCase();
@@ -1130,7 +1151,7 @@ async function handleDocument(chatId, doc) {
     if (doc.file_size && doc.file_size > byteLimit) {
       throw new Error(`That file is too large. Please send a ${upload.kind === 'image' ? 'image' : 'file'} smaller than ${Math.floor(byteLimit / (1024 * 1024))} MB.`);
     }
-    const store = sources.get(chatId) || { pdfs: [], images: [] };
+    const store = sources.get(sessionKey) || { pdfs: [], images: [] };
     const sourceCount = store.pdfs.length + store.images.length;
     if (sourceCount >= MAX_SOURCES_PER_CHAT) {
       throw new Error(`You have reached the source limit (${MAX_SOURCES_PER_CHAT}). Use /remove or /clear before adding more files.`);
@@ -1159,7 +1180,7 @@ async function handleDocument(chatId, doc) {
         return;
       }
       store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages, type: 'pdf' });
-      sources.set(chatId, store);
+      sources.set(sessionKey, store);
       saveSources();
       await send(chatId, `📄 Added "${escapeHtml(name)}" as PDF source (${store.pdfs.length} PDF source(s)). Ask me a question now.`);
     } else if (upload.kind === 'pptx') {
@@ -1168,12 +1189,12 @@ async function handleDocument(chatId, doc) {
         throw new Error('No readable text found in that PPTX (it may be image-only slides).');
       }
       store.pdfs.push({ name, text: parsed.text, pages: parsed.pages, type: 'pptx' });
-      sources.set(chatId, store);
+      sources.set(sessionKey, store);
       saveSources();
       await send(chatId, `📊 Added "${escapeHtml(name)}" as slides source (${store.pdfs.length} source(s), ${parsed.pages} slides). Ask me a question now.`);
     } else {
       store.images.push({ name, base64: buf.toString('base64'), mime: upload.mime });
-      sources.set(chatId, store);
+      sources.set(sessionKey, store);
       saveSources();
       await send(chatId, `🖼 Added "${escapeHtml(name)}" as image source (${store.images.length} image source(s)). Ask me a question now.`);
     }
@@ -1190,13 +1211,15 @@ async function handleUpdate(update) {
   const msg = update.message || update.edited_message;
   if (!msg || !msg.chat) return;
   const chatId = msg.chat.id;
+  const sessionKey = studySessionKey(msg);
+  if (sessionKey === null) return;
   const text = (msg.text || '').trim();
 
   if (msg.photo) {
     return handlePhoto(chatId, msg.photo, msg.caption, msg.media_group_id);
   }
   if (msg.document) {
-    return handleDocument(chatId, msg.document);
+    return handleDocument(chatId, msg.document, sessionKey);
   }
 
   const [rawCmd, ...rest] = text.split(/\s+/);
@@ -1213,7 +1236,7 @@ async function handleUpdate(update) {
     return send(chatId, '🔒 You do not need an API key or model command. ExamBuddy uses the owner-managed high-quality model configuration.');
   }
   if (cmd === '/sources') {
-    const store = sources.get(chatId) || { pdfs: [], images: [] };
+    const store = sources.get(sessionKey) || { pdfs: [], images: [] };
     return send(chatId, sourceListText(store));
   }
   if (cmd === '/remove') {
@@ -1221,7 +1244,7 @@ async function handleUpdate(update) {
     if (!Number.isInteger(requested) || requested < 1 || String(requested) !== args.trim()) {
       return send(chatId, 'Usage: <code>/remove &lt;number&gt;</code>. Use <code>/sources</code> to see source numbers.');
     }
-    const removed = removeListedSource(chatId, requested - 1);
+    const removed = removeListedSource(sessionKey, requested - 1);
     if (!removed) return send(chatId, `There is no source ${requested}. Use <code>/sources</code> to see the current list.`);
     return send(chatId, `Removed source ${requested}: ${escapeHtml(removed.name)}. Any active quiz was reset.`);
   }
@@ -1230,7 +1253,7 @@ async function handleUpdate(update) {
       return send(chatId, `Please keep the quiz topic under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters.`);
     }
     try {
-      return await createQuiz(chatId, args);
+      return await createQuiz(chatId, args, sessionKey);
     } catch (err) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
@@ -1240,13 +1263,13 @@ async function handleUpdate(update) {
       return send(chatId, `Please keep the flashcard topic under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters.`);
     }
     try {
-      return await createFlashcards(chatId, args);
+      return await createFlashcards(chatId, args, sessionKey);
     } catch (err) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
   }
   if (cmd === '/export' || cmd === '/history') {
-    const history = getHistory(chatId);
+    const history = getHistory(sessionKey);
     if (!history.length) return send(chatId, 'There is no recent chat history to export yet. Ask a question first.');
     try {
       await sendDocument(chatId, formatHistoryExport(history), 'exambuddy-chat-history.txt', 'Your recent ExamBuddy chat history.');
@@ -1256,57 +1279,57 @@ async function handleUpdate(update) {
     return;
   }
   if (cmd === '/analytics' || cmd === '/progress') {
-    const summary = quizPerformance.get(chatId);
-    if (!summary?.total) return send(chatId, 'No quiz answers recorded for this chat yet. Complete a source-grounded /quiz first.');
-    return sendLong(chatId, '📈 Your private quiz analytics\n\n', formatPerformanceAnalytics(summary));
+    const summary = quizPerformance.get(sessionKey);
+    if (!summary?.total) return send(chatId, 'No quiz answers recorded for your ExamBuddy workspace yet. Complete a source-grounded /quiz first.');
+    return sendLong(chatId, '📈 Your quiz analytics\n\n', formatPerformanceAnalytics(summary));
   }
   if (cmd === '/cancel') {
-    if (!activeQuizzes.has(chatId)) return send(chatId, 'There is no active quiz to cancel.');
-    activeQuizzes.delete(chatId);
+    if (!activeQuizzes.has(sessionKey)) return send(chatId, 'There is no active quiz to cancel.');
+    activeQuizzes.delete(sessionKey);
     return send(chatId, 'The active quiz was cancelled. Your uploaded sources are still available.');
   }
   if (cmd === '/clear') {
     const action = args.trim().toLowerCase();
     if (!action) {
-      requestClearConfirmation(chatId);
+      requestClearConfirmation(sessionKey);
       return send(chatId, '⚠️ This will permanently delete your uploaded sources, conversation memory, and active quiz state. To continue, send <code>/clear confirm</code> within 60 seconds. Send <code>/clear cancel</code> to keep everything.');
     }
     if (action === 'cancel') {
-      return send(chatId, cancelClearConfirmation(chatId)
+      return send(chatId, cancelClearConfirmation(sessionKey)
         ? 'Clear request cancelled. Your sources and conversation memory are unchanged.'
         : 'There is no pending clear request.');
     }
     if (action !== 'confirm') {
       return send(chatId, 'Usage: <code>/clear</code>, then <code>/clear confirm</code> or <code>/clear cancel</code>.');
     }
-    if (!cancelClearConfirmation(chatId)) {
+    if (!cancelClearConfirmation(sessionKey)) {
       return send(chatId, 'There is no pending clear request, or it expired. Send <code>/clear</code> to start again.');
     }
-    sources.delete(chatId);
-    histories.delete(chatId);
-    lastQuestions.delete(chatId);
-    activeQuizzes.delete(chatId);
-    quizPerformance.delete(chatId);
+    sources.delete(sessionKey);
+    histories.delete(sessionKey);
+    lastQuestions.delete(sessionKey);
+    activeQuizzes.delete(sessionKey);
+    quizPerformance.delete(sessionKey);
     saveSources();
-    return send(chatId, 'All sources, conversation memory, active quiz state, and private performance analytics cleared.');
+    return send(chatId, 'All sources, conversation memory, active quiz state, and performance analytics in your ExamBuddy workspace have been cleared.');
   }
   if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry' || cmd === '/pyanloke') {
-    const q = lastQuestions.get(chatId);
+    const q = lastQuestions.get(sessionKey);
     if (!q) return send(chatId, 'No previous question to rethink. Ask me something first.');
     try {
-      await handleText(chatId, q, { record: false });
+      await handleText(chatId, q, { record: false, sessionKey });
     } catch (err) {
       await send(chatId, `⚠️ Error: ${escapeHtml(err.message)}`).catch(() => {});
     }
     return;
   }
   if (text && !text.startsWith('/')) {
-    const quizAnswer = activeQuizzes.has(chatId) ? parseQuizAnswer(text) : null;
+    const quizAnswer = activeQuizzes.has(sessionKey) ? parseQuizAnswer(text) : null;
     try {
       if (quizAnswer !== null) {
-        await handleQuizAnswer(chatId, quizAnswer);
+        await handleQuizAnswer(chatId, quizAnswer, sessionKey);
       } else {
-        await handleText(chatId, text);
+        await handleText(chatId, text, { sessionKey });
       }
     } catch (err) {
       await send(chatId, `⚠️ Error: ${escapeHtml(err.message)}`).catch(() => {});
@@ -1405,6 +1428,7 @@ module.exports = {
     validateDocumentContent,
     splitMessageText,
     sources,
+    studySessionKey,
   },
 };
 

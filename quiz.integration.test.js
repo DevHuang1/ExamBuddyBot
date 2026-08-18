@@ -374,7 +374,7 @@ test('serializes updates from the same chat so replies cannot be delivered out o
 
   assert.equal(telegramMessagesSent.length, 3);
   assert.match(telegramMessagesSent[1], /clear confirm/i);
-  assert.match(telegramMessagesSent[2], /All sources, conversation memory, active quiz state, and private performance analytics cleared/);
+  assert.match(telegramMessagesSent[2], /All sources, conversation memory, active quiz state, and performance analytics in your ExamBuddy workspace have been cleared/);
 });
 
 
@@ -462,7 +462,7 @@ test('clears sources only after a pending clear request is confirmed', async () 
   assert.equal(__test.sources.has(CHAT_ID), false);
   assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
   assert.equal(__test.quizPerformance.has(CHAT_ID), false);
-  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, active quiz state, and private performance analytics cleared/i);
+  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, active quiz state, and performance analytics in your ExamBuddy workspace have been cleared/i);
 });
 
 test('does not clear sources when confirmation was not requested first', async () => {
@@ -572,7 +572,7 @@ test('reports safely when analytics are requested before any quiz answers', asyn
 
   await handleUpdate(message('/analytics'));
 
-  assert.match(telegramMessages(telegramCalls).at(-1), /No quiz answers recorded for this chat yet/i);
+  assert.match(telegramMessages(telegramCalls).at(-1), /No quiz answers recorded for your ExamBuddy workspace yet/i);
 });
 
 test('tracks quiz performance privately and recommends the weakest topic after enough answers', async () => {
@@ -600,10 +600,67 @@ test('tracks quiz performance privately and recommends the weakest topic after e
   await handleUpdate(message('/analytics'));
 
   const output = telegramMessages(telegramCalls).at(-1);
-  assert.match(output, /Your private quiz analytics/);
+  assert.match(output, /Your quiz analytics/);
   assert.match(output, /Session quiz performance: 2\/3 correct \(67%\)/);
   assert.match(output, /Algebra: 2\/2 \(100%\)/);
   assert.match(output, /Geometry: 0\/1 \(0%\)/);
   assert.match(output, /Prioritize Geometry/);
   assert.doesNotMatch(output, /Private other-chat topic/);
+});
+
+
+const GROUP_CHAT_ID = -1001234567890;
+const GROUP_ALICE_ID = 7001;
+const GROUP_BOB_ID = 7002;
+
+function groupMessage(userId, text) {
+  return {
+    message: {
+      chat: { id: GROUP_CHAT_ID, type: 'supergroup' },
+      from: { id: userId },
+      text,
+    },
+  };
+}
+
+test('isolates each group participant’s sources and study state', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const aliceKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/sources').message);
+  const bobKey = __test.studySessionKey(groupMessage(GROUP_BOB_ID, '/sources').message);
+
+  assert.equal(aliceKey, `group:${GROUP_CHAT_ID}:user:${GROUP_ALICE_ID}`);
+  assert.equal(bobKey, `group:${GROUP_CHAT_ID}:user:${GROUP_BOB_ID}`);
+  assert.notEqual(aliceKey, bobKey);
+
+  __test.sources.set(aliceKey, {
+    pdfs: [{ name: 'Alice biology.pdf', type: 'pdf', pages: 1, text: '[Page 1] Cells divide.' }],
+    images: [],
+  });
+  __test.sources.set(bobKey, {
+    pdfs: [{ name: 'Bob chemistry.pdf', type: 'pdf', pages: 1, text: '[Page 1] Atoms contain protons.' }],
+    images: [],
+  });
+  __test.histories.set(aliceKey, [{ role: 'user', content: 'Alice question' }]);
+  __test.histories.set(bobKey, [{ role: 'user', content: 'Bob question' }]);
+  __test.activeQuizzes.set(aliceKey, { topic: 'Biology', answerIndex: 0, choices: ['A', 'B', 'C', 'D'] });
+  __test.activeQuizzes.set(bobKey, { topic: 'Chemistry', answerIndex: 1, choices: ['A', 'B', 'C', 'D'] });
+  __test.quizPerformance.set(aliceKey, { total: 1, correct: 1, topics: new Map() });
+  __test.quizPerformance.set(bobKey, { total: 1, correct: 0, topics: new Map() });
+
+  await handleUpdate(groupMessage(GROUP_ALICE_ID, '/sources'));
+  const sourceListing = telegramMessages(telegramCalls).at(-1);
+  assert.match(sourceListing, /Alice biology\.pdf/);
+  assert.doesNotMatch(sourceListing, /Bob chemistry\.pdf/);
+
+  await handleUpdate(groupMessage(GROUP_ALICE_ID, '/clear'));
+  await handleUpdate(groupMessage(GROUP_ALICE_ID, '/clear confirm'));
+
+  assert.equal(__test.sources.has(aliceKey), false);
+  assert.equal(__test.histories.has(aliceKey), false);
+  assert.equal(__test.activeQuizzes.has(aliceKey), false);
+  assert.equal(__test.quizPerformance.has(aliceKey), false);
+  assert.equal(__test.sources.has(bobKey), true);
+  assert.equal(__test.histories.has(bobKey), true);
+  assert.equal(__test.activeQuizzes.has(bobKey), true);
+  assert.equal(__test.quizPerformance.has(bobKey), true);
 });

@@ -11,6 +11,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📖 **Resilient source retrieval** — answers use Hugging Face semantic embeddings when an owner token is configured, then fall back to local typo-tolerant fuzzy matching without sending source text to another provider. Lexical ranking remains available as an explicit opt-out fallback. Source material is treated as reference data, never as bot instructions.
 - ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, bit width, and dependency before drawing clean symbols and wires. It supports basic logic, 2:1 and 4:1 multiplexers, D/JK/T/SR flip-flops, 2-to-4 and 3-to-8 decoders, 4-to-2 and 8-to-3 encoders, plus configurable 2–32 bit registers with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context, while per-chat update processing keeps rapid messages and replies in order.
+- 👥 **Group-safe workspaces** — in groups and supergroups, every participant has separate sources, recent history, quiz state, and analytics. Bot replies remain visible to the group, as Telegram group messages normally do.
 - 🛡️ **Verified uploads** — PDF, PPTX, JPG, PNG, and WebP uploads are checked against their file signatures before parsing or storage, so mislabeled content is rejected safely.
 - 🔒 **No user API keys** — only the deployment owner supplies `GROQ_API_KEY` as an environment secret; students use the bot without keys or model commands.
 
@@ -93,7 +94,7 @@ docker build -t exambuddybot .
 docker run -d --env-file .env -e PORT=8080 -p 8080:8080 exambuddybot
 ```
 
-The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. Uploaded-source writes and the Telegram update checkpoint are performed atomically, reducing the risk of partial state after an interrupted save and preventing already-seen updates from being reprocessed after a restart. If `HF_TOKEN` is configured, the bot first calls Hugging Face Inference Providers for semantic source retrieval; when no token is configured or the remote provider fails, it uses local typo-tolerant matching without an additional dependency or external source-text request.
+The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. Uploaded-source writes and the Telegram update checkpoint are performed atomically, reducing the risk of partial state after an interrupted save and preventing already-seen updates from being reprocessed after a restart. Source libraries use stable workspace keys, preserving private-chat compatibility while isolating each group participant’s data. If `HF_TOKEN` is configured, the bot first calls Hugging Face Inference Providers for semantic source retrieval; when no token is configured or the remote provider fails, it uses local typo-tolerant matching without an additional dependency or external source-text request.
 
 ## Deploy to Railway
 
