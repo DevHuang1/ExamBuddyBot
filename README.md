@@ -46,7 +46,9 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | `/sources` | List uploaded sources with their stable removal numbers |
 | `/remove <number>` | Delete one source from the `/sources` list and reset any active quiz |
 | `/quiz [topic]` | Create one source-grounded multiple-choice practice question; reply with A–D to answer |
+| `/quiz source <number> [topic]` | Create a quiz from one numbered PDF/PPTX in `/sources`, preserving its original source number in citations |
 | `/flashcards [topic]` | Create five source-grounded study cards |
+| `/flashcards source <number> [topic]` | Create flashcards from one numbered PDF/PPTX in `/sources`, preserving its original source number in citations |
 | `/analytics` | Show private quiz accuracy and recommended study focus; in groups, delivered to the requester’s private chat |
 | `/export` | Download your recent chat history as a text file; in groups, delivered to the requester’s private chat |
 | `/cancel` | Cancel the active quiz while keeping uploaded sources |

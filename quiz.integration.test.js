@@ -725,3 +725,46 @@ test('delivers group analytics only to the requesting participant’s private ch
   assert.match(groupMessages[0], /sent to you in a private chat/i);
   assert.doesNotMatch(groupMessages[0], /Session quiz performance|Biology|Physics/);
 });
+
+
+test('creates a quiz from only the requested numbered PDF source and preserves its citation number', async () => {
+  const quizPayload = {
+    status: 'ok',
+    topic: 'Linear equations',
+    question: 'What is the degree of a linear equation?',
+    choices: ['Zero', 'One', 'Two', 'Three'],
+    answerIndex: 1,
+    explanation: 'A linear equation has degree one.',
+  };
+  const { groqCalls } = installFetchMock(quizPayload);
+  __test.sources.set(CHAT_ID, {
+    pdfs: [
+      { name: 'History notes.pdf', type: 'pdf', pages: 1, text: '[Page 1] The French Revolution began in 1789.' },
+      { name: 'Algebra notes.pdf', type: 'pdf', pages: 1, text: '[Page 1] A linear equation has degree one.' },
+    ],
+    images: [{ name: 'Diagram.png', base64: 'aW1hZ2U=', mime: 'image/png' }],
+  });
+
+  await handleUpdate(message('/quiz source 2 linear equations'));
+
+  assert.equal(groqCalls.length, 1);
+  const prompt = groqCalls[0].messages.at(-1).content[0].text;
+  assert.match(prompt, /Requested focus: linear equations/i);
+  assert.match(prompt, /Algebra notes\.pdf/);
+  assert.match(prompt, /<source 2>/);
+  assert.doesNotMatch(prompt, /History notes\.pdf/);
+  assert.doesNotMatch(prompt, /<source 1>/);
+});
+
+test('rejects an image when a source-scoped study command requires readable PDF or PPTX text', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+  __test.sources.set(CHAT_ID, {
+    pdfs: [{ name: 'Lecture.pdf', type: 'pdf', pages: 1, text: '[Page 1] Material.' }],
+    images: [{ name: 'Photo.png', base64: 'aW1hZ2U=', mime: 'image/png' }],
+  });
+
+  await handleUpdate(message('/flashcards source 2'));
+
+  assert.equal(groqCalls.length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /Source 2 is an image/i);
+});

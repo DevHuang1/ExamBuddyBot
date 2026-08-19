@@ -246,7 +246,9 @@ const HELP_TEXT =
   '/sources – list your uploaded sources\n' +
   '/remove &lt;number&gt; – delete one listed source\n' +
   '/quiz [topic] – create one practice question from your sources\n' +
+  '/quiz source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/flashcards [topic] – create five source-grounded study cards\n' +
+  '/flashcards source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/analytics – see your private quiz accuracy and study focus\n' +
   '/export – download your recent chat history as a text file\n' +
   '/cancel – cancel the current quiz without deleting sources\n' +
@@ -451,6 +453,31 @@ function sourceListText(store) {
   return `Your sources (${entries.length}):\n${lines.map(escapeHtml).join('\n')}\n\nUse <code>/remove &lt;number&gt;</code> to delete one source.`;
 }
 
+function parseSourceScopedTopic(args) {
+  const value = String(args || '').trim();
+  const match = value.match(/^source\s+(\d+)(?:\s+([\s\S]*))?$/i);
+  if (!match) return { topic: value, sourceNumber: null };
+  const sourceNumber = Number(match[1]);
+  return { sourceNumber, topic: String(match[2] || '').trim() };
+}
+
+function selectStudySources(store, sourceNumber) {
+  const textSources = Array.isArray(store?.pdfs) ? store.pdfs : [];
+  if (sourceNumber === null) return { sources: textSources };
+  if (!Number.isSafeInteger(sourceNumber) || sourceNumber < 1) {
+    return { error: 'Please provide a valid source number from <code>/sources</code>.' };
+  }
+  const source = listedSources(store)[sourceNumber - 1];
+  if (!source) return { error: `There is no source ${sourceNumber}. Use <code>/sources</code> to see the current list.` };
+  if (source.kind === 'Image') {
+    return { error: `Source ${sourceNumber} is an image. Source-scoped quizzes and flashcards require a PDF or PPTX source.` };
+  }
+  if (!String(source.text || '').trim()) {
+    return { error: `Source ${sourceNumber} has no readable text for a source-grounded quiz or flashcards.` };
+  }
+  return { sources: [{ ...source, sourceNumber }] };
+}
+
 function removeListedSource(chatId, index) {
   const store = sources.get(chatId) || { pdfs: [], images: [] };
   const entries = listedSources(store);
@@ -630,9 +657,14 @@ function flashcardText(flashcards) {
   return `Flashcards: ${flashcards.topic}\n\n${cards.join('\n\n')}`;
 }
 
-async function createQuiz(chatId, topic, sessionKey = chatId) {
+async function createQuiz(chatId, topic, sessionKey = chatId, sourceNumber = null) {
   const store = sources.get(sessionKey) || { pdfs: [], images: [] };
-  const context = await buildContext(store.pdfs, topic || 'practice question', MAX_SOURCE_CHARS);
+  const selected = selectStudySources(store, sourceNumber);
+  if (selected.error) {
+    await send(chatId, `📝 ${selected.error}`);
+    return;
+  }
+  const context = await buildContext(selected.sources, topic || 'practice question', MAX_SOURCE_CHARS);
   if (!context) {
     await send(chatId, '📝 To create a reliable quiz, first upload a PDF or PPTX source. Then use <code>/quiz</code> or <code>/quiz &lt;topic&gt;</code>.');
     return;
@@ -664,9 +696,14 @@ async function createQuiz(chatId, topic, sessionKey = chatId) {
   await send(chatId, quizMessage(quiz));
 }
 
-async function createFlashcards(chatId, topic, sessionKey = chatId) {
+async function createFlashcards(chatId, topic, sessionKey = chatId, sourceNumber = null) {
   const store = sources.get(sessionKey) || { pdfs: [], images: [] };
-  const context = await buildContext(store.pdfs, topic || 'a broad review of the uploaded sources', MAX_SOURCE_CHARS);
+  const selected = selectStudySources(store, sourceNumber);
+  if (selected.error) {
+    await send(chatId, `🗂 ${selected.error}`);
+    return;
+  }
+  const context = await buildContext(selected.sources, topic || 'a broad review of the uploaded sources', MAX_SOURCE_CHARS);
   if (!context) {
     await send(chatId, '🗂 To create reliable flashcards, first upload a PDF or PPTX source. Then use <code>/flashcards</code> or <code>/flashcards &lt;topic&gt;</code>.');
     return;
@@ -762,7 +799,8 @@ function chunkText(text, size = 900) {
 
 function chunkLabel(s, num, chunk) {
   const kind = s.type === 'pptx' ? 'Slides' : 'PDF';
-  return `<source ${num}> ${kind} "${s.name}"\n${chunk}\n</source ${num}>`;
+  const sourceNumber = Number.isSafeInteger(s.sourceNumber) && s.sourceNumber > 0 ? s.sourceNumber : num;
+  return `<source ${sourceNumber}> ${kind} "${s.name}"\n${chunk}\n</source ${sourceNumber}>`;
 }
 
 async function buildContext(sources, question, maxChars) {
@@ -1257,21 +1295,23 @@ async function handleUpdate(update) {
     return send(chatId, `Removed source ${requested}: ${escapeHtml(removed.name)}. Any active quiz was reset.`);
   }
   if (cmd === '/quiz') {
-    if (args.length > MAX_TEXT_QUESTION_CHARS) {
+    const scoped = parseSourceScopedTopic(args);
+    if (scoped.topic.length > MAX_TEXT_QUESTION_CHARS) {
       return send(chatId, `Please keep the quiz topic under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters.`);
     }
     try {
-      return await createQuiz(chatId, args, sessionKey);
+      return await createQuiz(chatId, scoped.topic, sessionKey, scoped.sourceNumber);
     } catch (err) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
   }
   if (cmd === '/flashcards') {
-    if (args.length > MAX_TEXT_QUESTION_CHARS) {
+    const scoped = parseSourceScopedTopic(args);
+    if (scoped.topic.length > MAX_TEXT_QUESTION_CHARS) {
       return send(chatId, `Please keep the flashcard topic under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters.`);
     }
     try {
-      return await createFlashcards(chatId, args, sessionKey);
+      return await createFlashcards(chatId, scoped.topic, sessionKey, scoped.sourceNumber);
     } catch (err) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
@@ -1462,6 +1502,8 @@ module.exports = {
     resetTestState,
     validateDocumentContent,
     splitMessageText,
+    parseSourceScopedTopic,
+    selectStudySources,
     sources,
     studySessionKey,
   },
