@@ -88,6 +88,88 @@ test('persists and restores the Telegram update checkpoint atomically', () => {
   }
 });
 
+test('persists workspace-isolated quiz analytics across restarts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy-analytics-'));
+  const analyticsFile = path.join(dir, 'quiz-performance.json');
+  const groupWorkspace = `group:${GROUP_CHAT_ID}:user:${GROUP_ALICE_ID}`;
+  try {
+    __test.quizPerformance.set(CHAT_ID, {
+      total: 3,
+      correct: 2,
+      topics: new Map([
+        ['Algebra', { total: 2, correct: 2 }],
+        ['Geometry', { total: 1, correct: 0 }],
+      ]),
+    });
+    __test.quizPerformance.set(groupWorkspace, {
+      total: 2,
+      correct: 1,
+      topics: new Map([['Biology', { total: 2, correct: 1 }]]),
+    });
+
+    assert.equal(__test.saveQuizPerformance(analyticsFile), true);
+    const stored = JSON.parse(fs.readFileSync(analyticsFile, 'utf8'));
+    assert.deepEqual(stored[String(CHAT_ID)], {
+      total: 3,
+      correct: 2,
+      topics: {
+        Algebra: { total: 2, correct: 2 },
+        Geometry: { total: 1, correct: 0 },
+      },
+    });
+    assert.deepEqual(stored[groupWorkspace], {
+      total: 2,
+      correct: 1,
+      topics: { Biology: { total: 2, correct: 1 } },
+    });
+
+    __test.quizPerformance.set('stale-workspace', {
+      total: 1,
+      correct: 1,
+      topics: new Map([['Stale', { total: 1, correct: 1 }]]),
+    });
+    assert.equal(__test.loadQuizPerformance(analyticsFile), 2);
+    assert.equal(__test.quizPerformance.has('stale-workspace'), false);
+    assert.deepEqual(__test.quizPerformance.get(CHAT_ID), {
+      total: 3,
+      correct: 2,
+      topics: new Map([
+        ['Algebra', { total: 2, correct: 2 }],
+        ['Geometry', { total: 1, correct: 0 }],
+      ]),
+    });
+    assert.deepEqual(__test.quizPerformance.get(groupWorkspace), {
+      total: 2,
+      correct: 1,
+      topics: new Map([['Biology', { total: 2, correct: 1 }]]),
+    });
+    assert.match(__test.formatPerformanceAnalytics(__test.quizPerformance.get(CHAT_ID)), /retained across restarts/i);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects invalid persisted quiz analytics without retaining stale workspace data', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy-analytics-invalid-'));
+  const analyticsFile = path.join(dir, 'quiz-performance.json');
+  try {
+    fs.writeFileSync(analyticsFile, JSON.stringify({
+      [CHAT_ID]: { total: 2, correct: 3, topics: { Algebra: { total: 2, correct: 2 } } },
+      invalid_workspace: { total: 1, correct: 1, topics: { Biology: { total: 1, correct: 1 } } },
+    }));
+    __test.quizPerformance.set(CHAT_ID, {
+      total: 1,
+      correct: 1,
+      topics: new Map([['Stale', { total: 1, correct: 1 }]]),
+    });
+
+    assert.equal(__test.loadQuizPerformance(analyticsFile), 0);
+    assert.equal(__test.quizPerformance.size, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('responds safely to /quiz when the chat has no uploaded source', async () => {
   const { telegramCalls, groqCalls } = installFetchMock({});
 
@@ -601,7 +683,7 @@ test('tracks quiz performance privately and recommends the weakest topic after e
 
   const output = telegramMessages(telegramCalls).at(-1);
   assert.match(output, /Your quiz analytics/);
-  assert.match(output, /Session quiz performance: 2\/3 correct \(67%\)/);
+  assert.match(output, /Quiz performance: 2\/3 correct \(67%\)/);
   assert.match(output, /Algebra: 2\/2 \(100%\)/);
   assert.match(output, /Geometry: 0\/1 \(0%\)/);
   assert.match(output, /Prioritize Geometry/);
@@ -644,8 +726,8 @@ test('isolates each group participant’s sources and study state', async () => 
   __test.histories.set(bobKey, [{ role: 'user', content: 'Bob question' }]);
   __test.activeQuizzes.set(aliceKey, { topic: 'Biology', answerIndex: 0, choices: ['A', 'B', 'C', 'D'] });
   __test.activeQuizzes.set(bobKey, { topic: 'Chemistry', answerIndex: 1, choices: ['A', 'B', 'C', 'D'] });
-  __test.quizPerformance.set(aliceKey, { total: 1, correct: 1, topics: new Map() });
-  __test.quizPerformance.set(bobKey, { total: 1, correct: 0, topics: new Map() });
+  __test.quizPerformance.set(aliceKey, { total: 1, correct: 1, topics: new Map([['Biology', { total: 1, correct: 1 }]]) });
+  __test.quizPerformance.set(bobKey, { total: 1, correct: 0, topics: new Map([['Chemistry', { total: 1, correct: 0 }]]) });
 
   await handleUpdate(groupMessage(GROUP_ALICE_ID, '/sources'));
   const sourceListing = telegramMessages(telegramCalls).at(-1);
@@ -713,7 +795,7 @@ test('delivers group analytics only to the requesting participant’s private ch
     call.url.includes('/sendMessage') && call.payload.chat_id === GROUP_ALICE_ID && /Your quiz analytics/.test(call.payload.text),
   );
   assert.ok(privateAnalytics);
-  assert.match(privateAnalytics.payload.text, /Session quiz performance: 2\/3 correct \(67%\)/);
+  assert.match(privateAnalytics.payload.text, /Quiz performance: 2\/3 correct \(67%\)/);
   assert.match(privateAnalytics.payload.text, /Biology: 2\/2 \(100%\)/);
   assert.match(privateAnalytics.payload.text, /Physics: 0\/1 \(0%\)/);
   assert.doesNotMatch(privateAnalytics.payload.text, /Chemistry/);
@@ -723,7 +805,7 @@ test('delivers group analytics only to the requesting participant’s private ch
     .map((call) => call.payload.text);
   assert.equal(groupMessages.length, 1);
   assert.match(groupMessages[0], /sent to you in a private chat/i);
-  assert.doesNotMatch(groupMessages[0], /Session quiz performance|Biology|Physics/);
+  assert.doesNotMatch(groupMessages[0], /Quiz performance|Biology|Physics/);
 });
 
 

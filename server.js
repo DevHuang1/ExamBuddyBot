@@ -113,6 +113,7 @@ function renderScannedPdfPages(buf) {
 
 const DATA_DIR = path.join(__dirname, 'data');
 const SOURCES_FILE = resolveFile('SOURCES_FILE', 'sources.json');
+const QUIZ_PERFORMANCE_FILE = resolveFile('QUIZ_PERFORMANCE_FILE', 'quiz-performance.json');
 const UPDATE_OFFSET_FILE = resolveFile('UPDATE_OFFSET_FILE', 'update-offset.json');
 const HF_RETRIEVAL_ENABLED = process.env.HF_RETRIEVAL_ENABLED !== 'false';
 const HF_TOKEN = (process.env.HF_TOKEN || '').trim();
@@ -329,6 +330,95 @@ function recordQuizPerformance(chatId, quiz, correct) {
   if (correct) topicSummary.correct++;
   summary.topics.set(topic, topicSummary);
   quizPerformance.set(chatId, summary);
+  saveQuizPerformance();
+}
+
+function normalizeQuizPerformanceSummary(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const total = value.total;
+  const correct = value.correct;
+  if (!Number.isSafeInteger(total) || !Number.isSafeInteger(correct) || total < 1 || correct < 0 || correct > total) return null;
+  if (!value.topics || typeof value.topics !== 'object' || Array.isArray(value.topics)) return null;
+
+  const topics = new Map();
+  let topicTotal = 0;
+  let topicCorrect = 0;
+  for (const [rawTopic, stats] of Object.entries(value.topics)) {
+    const topic = String(rawTopic).trim().slice(0, 160);
+    if (!topic || !stats || typeof stats !== 'object' || Array.isArray(stats)) return null;
+    if (!Number.isSafeInteger(stats.total) || !Number.isSafeInteger(stats.correct) || stats.total < 1 || stats.correct < 0 || stats.correct > stats.total) return null;
+    if (topics.has(topic)) return null;
+    topics.set(topic, { total: stats.total, correct: stats.correct });
+    topicTotal += stats.total;
+    topicCorrect += stats.correct;
+  }
+  if (!topics.size || topicTotal !== total || topicCorrect !== correct) return null;
+  return { total, correct, topics };
+}
+
+function serializeQuizPerformance() {
+  const serialized = {};
+  for (const [storedKey, summary] of quizPerformance) {
+    const sessionKey = normalizeStoredSessionKey(storedKey);
+    const normalized = normalizeQuizPerformanceSummary({
+      total: summary?.total,
+      correct: summary?.correct,
+      topics: Object.fromEntries(summary?.topics || []),
+    });
+    if (sessionKey === null || !normalized) {
+      console.warn(`Skipping invalid in-memory quiz analytics for workspace ${storedKey}.`);
+      continue;
+    }
+    serialized[String(sessionKey)] = {
+      total: normalized.total,
+      correct: normalized.correct,
+      topics: Object.fromEntries(normalized.topics),
+    };
+  }
+  return serialized;
+}
+
+function loadQuizPerformance(filePath = QUIZ_PERFORMANCE_FILE) {
+  try {
+    if (!fs.existsSync(filePath)) return 0;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Quiz performance store must contain a JSON object keyed by workspace.');
+    }
+    quizPerformance.clear();
+    let loaded = 0;
+    for (const [storedKey, value] of Object.entries(parsed)) {
+      const sessionKey = normalizeStoredSessionKey(storedKey);
+      const summary = normalizeQuizPerformanceSummary(value);
+      if (sessionKey === null || !summary) {
+        console.warn(`Ignoring invalid saved quiz analytics for workspace ${storedKey}.`);
+        continue;
+      }
+      quizPerformance.set(sessionKey, summary);
+      loaded++;
+    }
+    console.log(`Loaded quiz performance from ${filePath}: ${loaded} workspace(s).`);
+    return loaded;
+  } catch (err) {
+    console.error(`Could not load quiz performance from ${filePath}:`, err.message);
+    return 0;
+  }
+}
+
+function saveQuizPerformance(filePath = QUIZ_PERFORMANCE_FILE) {
+  let temporaryFile = null;
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    temporaryFile = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+    fs.writeFileSync(temporaryFile, JSON.stringify(serializeQuizPerformance()), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(temporaryFile, filePath);
+    return true;
+  } catch (err) {
+    if (temporaryFile) fs.rmSync(temporaryFile, { force: true });
+    console.error(`Could not save quiz performance to ${filePath}:`, err.message);
+    return false;
+  }
 }
 
 function formatPerformanceAnalytics(summary) {
@@ -347,11 +437,11 @@ function formatPerformanceAnalytics(summary) {
     .map((topic) => `${topic.topic}: ${topic.correct}/${topic.total} (${topic.accuracy}%)`)
     .join('\n');
   return [
-    `Session quiz performance: ${summary.correct}/${summary.total} correct (${accuracy}%).`,
+    `Quiz performance: ${summary.correct}/${summary.total} correct (${accuracy}%).`,
     'Topic breakdown:',
     breakdown,
     `Adaptive study focus: ${recommendation}`,
-    'This analytics summary belongs to your ExamBuddy workspace and resets when the bot restarts or you confirm /clear.',
+    'This private analytics summary is retained across restarts and is deleted when you confirm /clear.',
   ].join('\n\n');
 }
 
@@ -1384,6 +1474,7 @@ async function handleUpdate(update) {
     activeQuizzes.delete(sessionKey);
     quizPerformance.delete(sessionKey);
     saveSources();
+    saveQuizPerformance();
     return send(chatId, 'All sources, conversation memory, active quiz state, and performance analytics in your ExamBuddy workspace have been cleared.');
   }
   if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry' || cmd === '/pyanloke') {
@@ -1453,6 +1544,7 @@ async function poll() {
 async function main() {
   requireConfig();
   loadSources();
+  loadQuizPerformance();
   offset = loadUpdateOffset();
   startHealthServer();
   const me = await tg('getMe', {});
@@ -1461,6 +1553,7 @@ async function main() {
   console.log(`Owner-managed Groq key: ${GROQ_API_KEY ? 'configured' : 'missing'} | ${TAVILY_API_KEY ? 'Tavily search' : 'DuckDuckGo search'}`);
   console.log(`Semantic retrieval: ${HF_RETRIEVAL_ENABLED && HF_TOKEN ? `${HF_EMBEDDING_MODEL} via ${HF_INFERENCE_PROVIDER}, then ${FUZZY_RETRIEVAL_FALLBACK_ENABLED ? 'local fuzzy fallback' : 'lexical fallback'}` : HF_RETRIEVAL_ENABLED && FUZZY_RETRIEVAL_FALLBACK_ENABLED ? 'local fuzzy semantic fallback' : 'lexical fallback only'}`);
   console.log(`Source store: ${SOURCES_FILE}`);
+  console.log(`Quiz analytics store: ${QUIZ_PERFORMANCE_FILE}`);
   console.log(`Telegram update checkpoint: ${UPDATE_OFFSET_FILE} (starting offset ${offset})`);
   setInterval(poll, 1500);
   poll();
@@ -1488,7 +1581,11 @@ module.exports = {
     groupMemberId,
     isGroupChat,
     formatPerformanceAnalytics,
+    loadQuizPerformance,
+    normalizeQuizPerformanceSummary,
     quizPerformance,
+    saveQuizPerformance,
+    serializeQuizPerformance,
     formatHistoryExport,
     histories,
     enqueueUpdate,

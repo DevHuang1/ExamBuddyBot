@@ -7,7 +7,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📷 **Forward images or albums** (question papers, homework, notes) — pages are processed in order, with every readable question, option, formula, table, and circuit detected.
 - 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo) only when no sources are present. Source-backed questions stay source-only and are not sent to a search engine.
-- 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback.
+- 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback. Private quiz accuracy and study-focus analytics persist across restarts until the learner confirms `/clear`.
 - 📖 **Resilient source retrieval** — answers use Hugging Face semantic embeddings when an owner token is configured, then fall back to local typo-tolerant fuzzy matching without sending source text to another provider. Lexical ranking remains available as an explicit opt-out fallback. Source material is treated as reference data, never as bot instructions.
 - ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, bit width, and dependency before drawing clean symbols and wires. It supports basic logic, 2:1 and 4:1 multiplexers, D/JK/T/SR flip-flops, 2-to-4 and 3-to-8 decoders, 4-to-2 and 8-to-3 encoders, plus configurable 2–32 bit registers with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context, while per-chat update processing keeps rapid messages and replies in order.
@@ -90,6 +90,7 @@ npm start
 | `HF_INFERENCE_PROVIDER` | No | Hugging Face Inference Provider used for embeddings (default `hf-inference`) |
 | `FUZZY_RETRIEVAL_FALLBACK_ENABLED` | No | Enables local typo-tolerant source matching when remote embeddings are unavailable (default `true`); set `false` for lexical-only fallback. |
 | `SOURCES_FILE` | No | Optional path for persisted uploaded sources (defaults to `/data/sources.json` where available) |
+| `QUIZ_PERFORMANCE_FILE` | No | Optional path for private persisted quiz analytics, isolated by learner workspace (defaults to `/data/quiz-performance.json` where available) |
 | `UPDATE_OFFSET_FILE` | No | Optional path for the persisted Telegram update checkpoint, preventing already-seen updates from being reprocessed after a restart (defaults to `/data/update-offset.json` where available) |
 
 ## Docker
