@@ -850,3 +850,53 @@ test('rejects an image when a source-scoped study command requires readable PDF 
   assert.equal(groqCalls.length, 0);
   assert.match(telegramMessages(telegramCalls).at(-1), /Source 2 is an image/i);
 });
+
+
+test('generates a source-cited study guide from the requested numbered lecture source', async () => {
+  const guidePayload = {
+    status: 'ok',
+    topic: 'Linear equations',
+    overview: 'Linear equations are first-degree equations whose unknown values are represented by variables.',
+    keyPoints: Array.from({ length: 5 }, (_, index) => ({
+      point: `Linear-equation key point ${index + 1}.`,
+      source: 'PDF 2, page 1',
+    })),
+    examTips: ['Identify the variable.', 'Keep both sides balanced.', 'Check the result by substitution.'],
+    studyPlan: ['Review definitions.', 'Work through examples.', 'Complete a timed quiz.'],
+  };
+  const { telegramCalls, groqCalls } = installFetchMock(guidePayload);
+  __test.sources.set(CHAT_ID, {
+    pdfs: [
+      { name: 'History notes.pdf', type: 'pdf', pages: 1, text: '[Page 1] The French Revolution began in 1789.' },
+      { name: 'Algebra notes.pdf', type: 'pdf', pages: 1, text: '[Page 1] A linear equation has degree one.' },
+    ],
+    images: [],
+  });
+
+  await handleUpdate(message('/studyguide source 2 linear equations'));
+
+  assert.equal(groqCalls.length, 1);
+  assert.equal(groqCalls[0].response_format.json_schema.name, 'exam_buddy_study_guide');
+  assert.match(groqCalls[0].messages[0].content, /exactly five high-yield key points/i);
+  const prompt = groqCalls[0].messages.at(-1).content[0].text;
+  assert.match(prompt, /Requested focus: linear equations/i);
+  assert.match(prompt, /Algebra notes\.pdf/);
+  assert.match(prompt, /<source 2>/);
+  assert.doesNotMatch(prompt, /History notes\.pdf/);
+
+  const output = telegramMessages(telegramCalls).at(-1);
+  assert.match(output, /Study guide from your sources/);
+  assert.match(output, /Study guide: Linear equations/);
+  assert.match(output, /High-yield key points/);
+  assert.match(output, /Source: PDF 2, page 1/);
+  assert.match(output, /Three-step study plan/);
+});
+
+test('responds safely to /studyguide when no readable lecture source is available', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+
+  await handleUpdate(message('/studyguide calculus'));
+
+  assert.equal(groqCalls.length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /first upload a PDF or PPTX source/i);
+});

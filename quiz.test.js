@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeFlashcards, normalizeQuiz, parseQuizAnswer } = require('./quiz');
+const { normalizeFlashcards, normalizeQuiz, normalizeStudyGuide, parseQuizAnswer } = require('./quiz');
 
 test('normalizes a fenced JSON quiz response', () => {
   const quiz = normalizeQuiz('```json\n{"topic":"Algebra","question":"What is 2 + 2?","choices":["1","2","3","4"],"answerIndex":3,"explanation":"Two plus two equals four."}\n```');
@@ -42,6 +42,40 @@ test('rejects flashcards that are incomplete or missing source citations', () =>
       })),
     }),
     /incomplete or uncited cards/i,
+  );
+});
+
+test('normalizes a complete source-cited study guide', () => {
+  const guide = normalizeStudyGuide({
+    topic: 'Algebra',
+    overview: 'Linear equations are first-degree equations with variables representing unknown values.',
+    keyPoints: Array.from({ length: 5 }, (_, index) => ({
+      point: `Key algebra point ${index + 1}.`,
+      source: 'PDF 1, page 1',
+    })),
+    examTips: ['Read each equation carefully.', 'Show your working.', 'Check the final answer.'],
+    studyPlan: ['Review definitions.', 'Practice worked examples.', 'Complete a timed self-check.'],
+  });
+
+  assert.equal(guide.topic, 'Algebra');
+  assert.equal(guide.keyPoints.length, 5);
+  assert.equal(guide.examTips.length, 3);
+  assert.equal(guide.studyPlan.length, 3);
+});
+
+test('rejects incomplete or uncited study guides', () => {
+  assert.throws(
+    () => normalizeStudyGuide({
+      topic: 'Algebra',
+      overview: 'Overview',
+      keyPoints: Array.from({ length: 5 }, (_, index) => ({
+        point: `Point ${index + 1}`,
+        source: index === 0 ? '' : 'PDF 1, page 1',
+      })),
+      examTips: ['One', 'Two', 'Three'],
+      studyPlan: ['One', 'Two'],
+    }),
+    /incomplete or uncited content/i,
   );
 });
 

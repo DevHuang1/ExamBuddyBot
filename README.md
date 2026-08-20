@@ -7,7 +7,8 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📷 **Forward images or albums** (question papers, homework, notes) — pages are processed in order, with every readable question, option, formula, table, and circuit detected.
 - 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo) only when no sources are present. Source-backed questions stay source-only and are not sent to a search engine.
-- 📝 **Source-grounded quizzes** — use `/quiz [topic]` to generate one validated multiple-choice practice question from uploaded PDF/PPTX sources, then reply with A–D for immediate feedback. Private quiz accuracy and study-focus analytics persist across restarts until the learner confirms `/clear`.
+- 📝 **Source-grounded quizzes and revision guides** — use `/quiz [topic]` for validated multiple-choice practice and `/studyguide [topic]` for an exam-ready overview, cited key points, practical tips, and a three-step study plan from uploaded PDF/PPTX sources.
+- 📈 **Private quiz analytics** — accuracy and adaptive study-focus analytics persist across restarts until the learner confirms `/clear`.
 - 📖 **Resilient source retrieval** — answers use Hugging Face semantic embeddings when an owner token is configured, then fall back to local typo-tolerant fuzzy matching without sending source text to another provider. Lexical ranking remains available as an explicit opt-out fallback. Source material is treated as reference data, never as bot instructions.
 - ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, bit width, and dependency before drawing clean symbols and wires. It supports basic logic, 2:1 and 4:1 multiplexers, D/JK/T/SR flip-flops, 2-to-4 and 3-to-8 decoders, 4-to-2 and 8-to-3 encoders, plus configurable 2–32 bit registers with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context, while per-chat update processing keeps rapid messages and replies in order.
@@ -49,6 +50,8 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | `/quiz source <number> [topic]` | Create a quiz from one numbered PDF/PPTX in `/sources`, preserving its original source number in citations |
 | `/flashcards [topic]` | Create five source-grounded study cards |
 | `/flashcards source <number> [topic]` | Create flashcards from one numbered PDF/PPTX in `/sources`, preserving its original source number in citations |
+| `/studyguide [topic]` | Create a source-cited exam revision guide with five high-yield points, three exam tips, and a three-step study plan |
+| `/studyguide source <number> [topic]` | Create a revision guide from one numbered PDF/PPTX in `/sources`, preserving its original source number in citations |
 | `/analytics` | Show private quiz accuracy and recommended study focus; in groups, delivered to the requester’s private chat |
 | `/export` | Download your recent chat history as a text file; in groups, delivered to the requester’s private chat |
 | `/cancel` | Cancel the active quiz while keeping uploaded sources |
