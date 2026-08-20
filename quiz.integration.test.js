@@ -900,3 +900,50 @@ test('responds safely to /studyguide when no readable lecture source is availabl
   assert.equal(groqCalls.length, 0);
   assert.match(telegramMessages(telegramCalls).at(-1), /first upload a PDF or PPTX source/i);
 });
+
+
+test('processes separate group workspaces concurrently while preserving each workspace queue', async () => {
+  let releaseFirstResponse;
+  let signalFirstResponse;
+  const firstResponseStarted = new Promise((resolve) => { signalFirstResponse = resolve; });
+  const firstResponseGate = new Promise((resolve) => { releaseFirstResponse = resolve; });
+  const sentMessages = [];
+  let isFirstResponse = true;
+
+  global.fetch = async (url, options = {}) => {
+    const target = String(url);
+    if (!target.includes('api.telegram.org')) throw new Error(`Unexpected request: ${target}`);
+    const payload = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    if (target.includes('/sendMessage')) {
+      sentMessages.push(payload);
+      if (isFirstResponse) {
+        isFirstResponse = false;
+        signalFirstResponse();
+        await firstResponseGate;
+      }
+    }
+    return response({ ok: true, result: {} });
+  };
+
+  const aliceUpdate = groupMessage(GROUP_ALICE_ID, '/sources');
+  const bobUpdate = groupMessage(GROUP_BOB_ID, '/sources');
+  assert.notEqual(__test.updateQueueKey(aliceUpdate), __test.updateQueueKey(bobUpdate));
+
+  const alice = __test.enqueueUpdate(aliceUpdate);
+  await firstResponseStarted;
+  const bob = __test.enqueueUpdate(bobUpdate);
+  try {
+    const bobCompletedBeforeAlice = await Promise.race([
+      bob.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    assert.equal(bobCompletedBeforeAlice, true);
+  } finally {
+    releaseFirstResponse();
+    await Promise.all([alice, bob]);
+  }
+
+  assert.equal(sentMessages.length, 2);
+  assert.match(sentMessages[0].text, /No sources yet/);
+  assert.match(sentMessages[1].text, /No sources yet/);
+});

@@ -1608,14 +1608,22 @@ async function handleUpdate(update) {
 
 // ---------- polling ----------
 
+function updateQueueKey(update) {
+  const msg = update?.message || update?.edited_message;
+  const sessionKey = studySessionKey(msg);
+  if (sessionKey !== null) return sessionKey;
+  const chatId = msg?.chat?.id;
+  return Number.isSafeInteger(chatId) ? chatId : null;
+}
+
 function enqueueUpdate(update) {
-  const chatId = update?.message?.chat?.id ?? update?.edited_message?.chat?.id;
-  if (chatId === undefined || chatId === null) return handleUpdate(update);
-  const previous = chatQueues.get(chatId) || Promise.resolve();
+  const queueKey = updateQueueKey(update);
+  if (queueKey === null) return handleUpdate(update);
+  const previous = chatQueues.get(queueKey) || Promise.resolve();
   const current = previous.catch(() => {}).then(() => handleUpdate(update));
-  chatQueues.set(chatId, current);
+  chatQueues.set(queueKey, current);
   return current.finally(() => {
-    if (chatQueues.get(chatId) === current) chatQueues.delete(chatId);
+    if (chatQueues.get(queueKey) === current) chatQueues.delete(queueKey);
   });
 }
 
@@ -1695,6 +1703,7 @@ module.exports = {
     histories,
     enqueueUpdate,
     extractAndSendDiagram,
+    updateQueueKey,
     parsePptx,
     classifyDocumentUpload,
     detectUploadContent,
