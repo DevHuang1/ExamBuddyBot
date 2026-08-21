@@ -295,6 +295,7 @@ const HELP_TEXT =
   '/studyguide [topic] – create a cited exam revision guide\n' +
   '/studyguide source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/analytics – see your private quiz accuracy and study focus\n' +
+  '/limits – see your remaining study-request capacity\n' +
   '/export – download your recent chat history as a text file\n' +
   '/cancel – cancel the current quiz without deleting sources\n' +
   '/rethink – re-answer your last question\n' +
@@ -345,22 +346,38 @@ function getHistory(chatId) {
   return histories.get(chatId) || [];
 }
 
-function consumeModelRequestSlots(sessionKey, slots = 1, now = Date.now()) {
-  const requestedSlots = Number.isSafeInteger(slots) && slots > 0 ? slots : 1;
+function getModelRequestBudget(sessionKey, now = Date.now()) {
   const windowMs = MODEL_REQUEST_WINDOW_SECONDS * 1000;
   const cutoff = now - windowMs;
   const recent = (modelRequestBuckets.get(sessionKey) || []).filter((timestamp) => timestamp > cutoff && timestamp <= now);
-  const remaining = MAX_MODEL_REQUESTS_PER_WINDOW - recent.length;
-  if (requestedSlots > remaining) {
-    if (recent.length) modelRequestBuckets.set(sessionKey, recent);
-    else modelRequestBuckets.delete(sessionKey);
-    const oldest = recent[0];
-    const retryAfterSeconds = oldest === undefined ? MODEL_REQUEST_WINDOW_SECONDS : Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
-    return { allowed: false, remaining: Math.max(0, remaining), retryAfterSeconds };
+  if (recent.length) modelRequestBuckets.set(sessionKey, recent);
+  else modelRequestBuckets.delete(sessionKey);
+  const remaining = Math.max(0, MAX_MODEL_REQUESTS_PER_WINDOW - recent.length);
+  const oldest = recent[0];
+  const retryAfterSeconds = oldest === undefined ? 0 : Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+  return { used: recent.length, remaining, retryAfterSeconds };
+}
+
+function consumeModelRequestSlots(sessionKey, slots = 1, now = Date.now()) {
+  const requestedSlots = Number.isSafeInteger(slots) && slots > 0 ? slots : 1;
+  const budget = getModelRequestBudget(sessionKey, now);
+  if (requestedSlots > budget.remaining) {
+    return { allowed: false, remaining: budget.remaining, retryAfterSeconds: budget.retryAfterSeconds || MODEL_REQUEST_WINDOW_SECONDS };
   }
+  const recent = modelRequestBuckets.get(sessionKey) || [];
   recent.push(...Array(requestedSlots).fill(now));
   modelRequestBuckets.set(sessionKey, recent);
   return { allowed: true, remaining: MAX_MODEL_REQUESTS_PER_WINDOW - recent.length, retryAfterSeconds: 0 };
+}
+
+function formatModelRequestBudget(sessionKey) {
+  const budget = getModelRequestBudget(sessionKey);
+  const requestWord = budget.remaining === 1 ? 'study request' : 'study requests';
+  const windowWord = MODEL_REQUEST_WINDOW_SECONDS === 1 ? 'second' : 'seconds';
+  const base = `⏳ This workspace has ${budget.remaining} ${requestWord} available in the current ${MODEL_REQUEST_WINDOW_SECONDS}-${windowWord} window.`;
+  if (budget.remaining) return base;
+  const retryWord = budget.retryAfterSeconds === 1 ? 'second' : 'seconds';
+  return `${base} The next request becomes available in about ${budget.retryAfterSeconds} ${retryWord}.`;
 }
 
 async function reserveModelRequests(chatId, sessionKey, slots = 1) {
@@ -1566,6 +1583,9 @@ async function handleUpdate(update) {
     }
     return;
   }
+  if (cmd === '/limits' || cmd === '/usage' || cmd === '/quota') {
+    return send(chatId, formatModelRequestBudget(sessionKey));
+  }
   if (cmd === '/analytics' || cmd === '/progress') {
     const summary = quizPerformance.get(sessionKey);
     if (!summary?.total) return send(chatId, 'No quiz answers recorded for your ExamBuddy workspace yet. Complete a source-grounded /quiz first.');
@@ -1734,9 +1754,11 @@ module.exports = {
     loadQuizPerformance,
     normalizeQuizPerformanceSummary,
     consumeModelRequestSlots,
+    formatHistoryExport,
+    formatModelRequestBudget,
+    getModelRequestBudget,
     saveQuizPerformance,
     serializeQuizPerformance,
-    formatHistoryExport,
     histories,
     enqueueUpdate,
     extractAndSendDiagram,

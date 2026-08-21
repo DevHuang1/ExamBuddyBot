@@ -53,6 +53,7 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | `/studyguide [topic]` | Create a source-cited exam revision guide with five high-yield points, three exam tips, and a three-step study plan |
 | `/studyguide source <number> [topic]` | Create a revision guide from one numbered PDF/PPTX in `/sources`, preserving its original source number in citations |
 | `/analytics` | Show private quiz accuracy and recommended study focus; in groups, delivered to the requester’s private chat |
+| `/limits` | Show the workspace’s remaining study-request capacity without using a request |
 | `/export` | Download your recent chat history as a text file; in groups, delivered to the requester’s private chat |
 | `/cancel` | Cancel the active quiz while keeping uploaded sources |
 | `/rethink` | Re-answer your last question |

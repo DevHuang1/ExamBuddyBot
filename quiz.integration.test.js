@@ -970,3 +970,30 @@ test('enforces model request budgets independently per workspace and releases ex
   const afterWindow = __test.consumeModelRequestSlots(primaryWorkspace, 1, base + 60_001);
   assert.equal(afterWindow.allowed, true);
 });
+
+
+test('reports workspace request capacity without consuming a study-request slot', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+  const now = Date.now();
+  __test.consumeModelRequestSlots(CHAT_ID, 2, now);
+  __test.consumeModelRequestSlots('another-workspace', 4, now);
+
+  await handleUpdate(message('/limits'));
+
+  assert.equal(groqCalls.length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /10 study requests available/i);
+  assert.equal(__test.getModelRequestBudget(CHAT_ID, now).used, 2);
+  assert.equal(__test.getModelRequestBudget(CHAT_ID, now).remaining, 10);
+});
+
+test('explains when the next study request slot becomes available', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const now = Date.now();
+  __test.consumeModelRequestSlots(CHAT_ID, 12, now);
+
+  await handleUpdate(message('/usage'));
+
+  const output = telegramMessages(telegramCalls).at(-1);
+  assert.match(output, /0 study requests available/i);
+  assert.match(output, /next request becomes available in about/i);
+});
