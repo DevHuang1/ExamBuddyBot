@@ -40,6 +40,8 @@ const MAX_VISION_IMAGES_PER_REQUEST = 5;
 const MAX_SCANNED_PDF_PAGES = parseInt(process.env.MAX_SCANNED_PDF_PAGES || '15', 10);
 const PDF_RENDER_DPI = parseInt(process.env.PDF_RENDER_DPI || '160', 10);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS || '60000', 10);
+const MODEL_REQUEST_WINDOW_SECONDS = Math.max(1, parseInt(process.env.MODEL_REQUEST_WINDOW_SECONDS || '60', 10) || 60);
+const MAX_MODEL_REQUESTS_PER_WINDOW = Math.max(1, parseInt(process.env.MAX_MODEL_REQUESTS_PER_WINDOW || '12', 10) || 12);
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 
@@ -307,6 +309,7 @@ const activeQuizzes = new Map(); // sessionKey -> validated multiple-choice quiz
 const quizPerformance = new Map(); // sessionKey -> session-only quiz accuracy and topic results
 const pendingClears = new Map(); // sessionKey -> confirmation timer for destructive clearing
 const chatQueues = new Map(); // chatId -> Promise serializing incoming updates for that chat
+const modelRequestBuckets = new Map(); // sessionKey -> timestamps of reserved model calls
 const MAX_HISTORY = 10;
 const CLEAR_CONFIRMATION_WINDOW_MS = 60 * 1000;
 
@@ -340,6 +343,32 @@ function normalizeStoredSessionKey(value) {
 
 function getHistory(chatId) {
   return histories.get(chatId) || [];
+}
+
+function consumeModelRequestSlots(sessionKey, slots = 1, now = Date.now()) {
+  const requestedSlots = Number.isSafeInteger(slots) && slots > 0 ? slots : 1;
+  const windowMs = MODEL_REQUEST_WINDOW_SECONDS * 1000;
+  const cutoff = now - windowMs;
+  const recent = (modelRequestBuckets.get(sessionKey) || []).filter((timestamp) => timestamp > cutoff && timestamp <= now);
+  const remaining = MAX_MODEL_REQUESTS_PER_WINDOW - recent.length;
+  if (requestedSlots > remaining) {
+    if (recent.length) modelRequestBuckets.set(sessionKey, recent);
+    else modelRequestBuckets.delete(sessionKey);
+    const oldest = recent[0];
+    const retryAfterSeconds = oldest === undefined ? MODEL_REQUEST_WINDOW_SECONDS : Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+    return { allowed: false, remaining: Math.max(0, remaining), retryAfterSeconds };
+  }
+  recent.push(...Array(requestedSlots).fill(now));
+  modelRequestBuckets.set(sessionKey, recent);
+  return { allowed: true, remaining: MAX_MODEL_REQUESTS_PER_WINDOW - recent.length, retryAfterSeconds: 0 };
+}
+
+async function reserveModelRequests(chatId, sessionKey, slots = 1) {
+  const budget = consumeModelRequestSlots(sessionKey, slots);
+  if (budget.allowed) return true;
+  const unit = budget.retryAfterSeconds === 1 ? 'second' : 'seconds';
+  await send(chatId, `⏳ You have reached the study-request limit for this workspace. Please try again in about ${budget.retryAfterSeconds} ${unit}.`);
+  return false;
 }
 
 function pushHistory(chatId, role, content) {
@@ -816,6 +845,7 @@ async function createQuiz(chatId, topic, sessionKey = chatId, sourceNumber = nul
     return;
   }
 
+  if (!await reserveModelRequests(chatId, sessionKey)) return;
   await typing(chatId);
   const request = [
     `Requested focus: ${topic || 'choose an important concept from the uploaded sources'}.`,
@@ -855,6 +885,7 @@ async function createFlashcards(chatId, topic, sessionKey = chatId, sourceNumber
     return;
   }
 
+  if (!await reserveModelRequests(chatId, sessionKey)) return;
   await typing(chatId);
   const request = [
     `Requested focus: ${topic || 'choose the most important concepts from the uploaded sources'}.`,
@@ -893,6 +924,7 @@ async function createStudyGuide(chatId, topic, sessionKey = chatId, sourceNumber
     return;
   }
 
+  if (!await reserveModelRequests(chatId, sessionKey)) return;
   await typing(chatId);
   const request = [
     `Requested focus: ${topic || 'choose the most important concepts from the uploaded sources'}.`,
@@ -1200,6 +1232,7 @@ async function handleText(chatId, text, { record = true, sessionKey = chatId } =
   const usableImages = store.images;
 
   lastQuestions.set(sessionKey, text);
+  if (!await reserveModelRequests(chatId, sessionKey)) return;
   await typing(chatId);
 
   if (usablePdfs.length || usableImages.length) {
@@ -1245,10 +1278,12 @@ async function handleText(chatId, text, { record = true, sessionKey = chatId } =
   }
 }
 
-async function answerImages(chatId, images, caption) {
+async function answerImages(chatId, images, caption, sessionKey = chatId) {
   if (!images.length) return;
   const question = caption && caption.trim() ? caption.trim() : '';
   const batches = [];
+  const batchCount = Math.ceil(images.length / MAX_VISION_IMAGES_PER_REQUEST);
+  if (!await reserveModelRequests(chatId, sessionKey, batchCount)) return;
   await send(chatId, `🔍 Reading ${images.length} image(s) in page order…`);
 
   for (let start = 0; start < images.length; start += MAX_VISION_IMAGES_PER_REQUEST) {
@@ -1340,14 +1375,14 @@ function scheduleAlbum(mediaGroupId) {
     if (!ready) return;
     albums.delete(mediaGroupId);
     try {
-      await answerImages(ready.chatId, ready.photos, ready.caption);
+      await answerImages(ready.chatId, ready.photos, ready.caption, ready.sessionKey);
     } catch (err) {
       await send(ready.chatId, `⚠️ Error: ${escapeHtml(err.message)}`).catch(() => {});
     }
   }, 1400);
 }
 
-async function handlePhoto(chatId, photo, caption, mediaGroupId) {
+async function handlePhoto(chatId, photo, caption, mediaGroupId, sessionKey = chatId) {
   try {
     const img = await grabPhoto(chatId, photo);
     if (mediaGroupId) {
@@ -1358,12 +1393,12 @@ async function handlePhoto(chatId, photo, caption, mediaGroupId) {
         scheduleAlbum(mediaGroupId);
         return;
       }
-      const album = { chatId, photos: [img], caption: caption || '', timer: null };
+      const album = { chatId, sessionKey, photos: [img], caption: caption || '', timer: null };
       albums.set(mediaGroupId, album);
       scheduleAlbum(mediaGroupId);
       return;
     }
-    await answerImages(chatId, [img], caption);
+    await answerImages(chatId, [img], caption, sessionKey);
   } catch (err) {
     await send(chatId, `⚠️ Error: ${escapeHtml(err.message)}`).catch(() => {});
   }
@@ -1406,7 +1441,7 @@ async function handleDocument(chatId, doc, sessionKey = chatId) {
         const pages = renderScannedPdfPages(buf);
         if (!pages.length) throw new Error('No readable pages could be rendered from that PDF.');
         await send(chatId, `📷 This is a scanned PDF, so I am reading its first ${pages.length} page(s) with full-page vision detection.`);
-        await answerImages(chatId, pages, `Scanned PDF: ${name}`);
+        await answerImages(chatId, pages, `Scanned PDF: ${name}`, sessionKey);
         return;
       }
       store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages, type: 'pdf' });
@@ -1446,7 +1481,7 @@ async function handleUpdate(update) {
   const text = (msg.text || '').trim();
 
   if (msg.photo) {
-    return handlePhoto(chatId, msg.photo, msg.caption, msg.media_group_id);
+    return handlePhoto(chatId, msg.photo, msg.caption, msg.media_group_id, sessionKey);
   }
   if (msg.document) {
     return handleDocument(chatId, msg.document, sessionKey);
@@ -1682,6 +1717,7 @@ function resetTestState() {
   for (const { timer } of pendingClears.values()) clearTimeout(timer);
   pendingClears.clear();
   chatQueues.clear();
+  modelRequestBuckets.clear();
   offset = 0;
   polling = false;
 }
@@ -1691,12 +1727,13 @@ module.exports = {
   __test: {
     activeQuizzes,
     answerImages,
+    quizPerformance,
     groupMemberId,
     isGroupChat,
     formatPerformanceAnalytics,
     loadQuizPerformance,
     normalizeQuizPerformanceSummary,
-    quizPerformance,
+    consumeModelRequestSlots,
     saveQuizPerformance,
     serializeQuizPerformance,
     formatHistoryExport,

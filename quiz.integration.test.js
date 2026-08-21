@@ -947,3 +947,26 @@ test('processes separate group workspaces concurrently while preserving each wor
   assert.match(sentMessages[0].text, /No sources yet/);
   assert.match(sentMessages[1].text, /No sources yet/);
 });
+
+
+test('enforces model request budgets independently per workspace and releases expired slots', () => {
+  const base = 1_000_000;
+  const primaryWorkspace = 'budget-primary';
+  const separateWorkspace = 'budget-separate';
+
+  for (let index = 0; index < 12; index++) {
+    const result = __test.consumeModelRequestSlots(primaryWorkspace, 1, base);
+    assert.equal(result.allowed, true);
+  }
+
+  const blocked = __test.consumeModelRequestSlots(primaryWorkspace, 1, base);
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.remaining, 0);
+  assert.equal(blocked.retryAfterSeconds, 60);
+
+  const separate = __test.consumeModelRequestSlots(separateWorkspace, 1, base);
+  assert.equal(separate.allowed, true);
+
+  const afterWindow = __test.consumeModelRequestSlots(primaryWorkspace, 1, base + 60_001);
+  assert.equal(afterWindow.allowed, true);
+});
