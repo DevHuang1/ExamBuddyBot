@@ -997,3 +997,45 @@ test('explains when the next study request slot becomes available', async () => 
   assert.match(output, /0 study requests available/i);
   assert.match(output, /next request becomes available in about/i);
 });
+
+
+test('uses the weakest private quiz topic for adaptive practice and creates a source-grounded quiz', async () => {
+  const quizPayload = {
+    status: 'ok',
+    topic: 'Geometry',
+    question: 'What is the sum of the angles in a triangle?',
+    choices: ['90 degrees', '180 degrees', '270 degrees', '360 degrees'],
+    answerIndex: 1,
+    explanation: 'The interior angles of a triangle sum to 180 degrees.',
+  };
+  const { telegramCalls, groqCalls } = installFetchMock(quizPayload);
+  seedSource();
+  __test.quizPerformance.set(CHAT_ID, {
+    total: 3,
+    correct: 2,
+    topics: new Map([
+      ['Algebra', { total: 2, correct: 2 }],
+      ['Geometry', { total: 1, correct: 0 }],
+    ]),
+  });
+
+  await handleUpdate(message('/practice'));
+
+  assert.equal(groqCalls.length, 1);
+  assert.match(groqCalls[0].messages.at(-1).content[0].text, /Requested focus: Geometry/i);
+  const replies = telegramMessages(telegramCalls);
+  assert.match(replies[0], /Targeting Geometry: 0\/1 correct \(0%\), your lowest recorded topic/i);
+  assert.match(replies.at(-1), /Practice quiz: Geometry/);
+});
+
+test('uses a broad source-grounded practice question before any quiz history and honors an explicit topic', () => {
+  const broad = __test.selectPracticeTopic(undefined);
+  assert.equal(broad.topic, '');
+  assert.match(broad.reason, /No completed quiz history/i);
+
+  const topic = __test.selectPracticeTopic({
+    total: 2,
+    topics: new Map([['Algebra', { total: 2, correct: 1 }]]),
+  });
+  assert.equal(topic.topic, 'Algebra');
+});

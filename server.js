@@ -288,6 +288,7 @@ const HELP_TEXT =
   'Commands:\n' +
   '/sources – list your uploaded sources\n' +
   '/remove &lt;number&gt; – delete one listed source\n' +
+  '/practice [topic] – create an adaptive question, or target a topic\n' +
   '/quiz [topic] – create one practice question from your sources\n' +
   '/quiz source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/flashcards [topic] – create five source-grounded study cards\n' +
@@ -507,6 +508,23 @@ function saveQuizPerformance(filePath = QUIZ_PERFORMANCE_FILE) {
     console.error(`Could not save quiz performance to ${filePath}:`, err.message);
     return false;
   }
+}
+
+function selectPracticeTopic(summary) {
+  if (!summary?.total || !(summary.topics instanceof Map) || !summary.topics.size) {
+    return {
+      topic: '',
+      reason: 'No completed quiz history yet, so this will use a broad source-grounded practice question.',
+    };
+  }
+  const ranked = [...summary.topics.entries()]
+    .map(([topic, stats]) => ({ topic, ...stats, accuracy: Math.round((stats.correct / stats.total) * 100) }))
+    .sort((left, right) => left.accuracy - right.accuracy || right.total - left.total || left.topic.localeCompare(right.topic));
+  const weakest = ranked[0];
+  return {
+    topic: weakest.topic,
+    reason: `Targeting ${weakest.topic}: ${weakest.correct}/${weakest.total} correct (${weakest.accuracy}%), your lowest recorded topic.`,
+  };
 }
 
 function formatPerformanceAnalytics(summary) {
@@ -1530,6 +1548,19 @@ async function handleUpdate(update) {
     if (!removed) return send(chatId, `There is no source ${requested}. Use <code>/sources</code> to see the current list.`);
     return send(chatId, `Removed source ${requested}: ${escapeHtml(removed.name)}. Any active quiz was reset.`);
   }
+  if (cmd === '/practice') {
+    const scoped = parseSourceScopedTopic(args);
+    if (scoped.topic.length > MAX_TEXT_QUESTION_CHARS) {
+      return send(chatId, `Please keep the practice topic under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters.`);
+    }
+    const adaptive = scoped.topic ? { topic: scoped.topic, reason: `Targeting your requested topic: ${scoped.topic}.` } : selectPracticeTopic(quizPerformance.get(sessionKey));
+    await send(chatId, `🎯 Adaptive practice: ${escapeHtml(adaptive.reason)}`);
+    try {
+      return await createQuiz(chatId, adaptive.topic, sessionKey, scoped.sourceNumber);
+    } catch (err) {
+      return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
+    }
+  }
   if (cmd === '/quiz') {
     const scoped = parseSourceScopedTopic(args);
     if (scoped.topic.length > MAX_TEXT_QUESTION_CHARS) {
@@ -1751,6 +1782,7 @@ module.exports = {
     groupMemberId,
     isGroupChat,
     formatPerformanceAnalytics,
+    selectPracticeTopic,
     loadQuizPerformance,
     normalizeQuizPerformanceSummary,
     consumeModelRequestSlots,

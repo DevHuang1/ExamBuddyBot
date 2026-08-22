@@ -8,7 +8,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 - 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo) only when no sources are present. Source-backed questions stay source-only and are not sent to a search engine.
 - 📝 **Source-grounded quizzes and revision guides** — use `/quiz [topic]` for validated multiple-choice practice and `/studyguide [topic]` for an exam-ready overview, cited key points, practical tips, and a three-step study plan from uploaded PDF/PPTX sources.
-- 📈 **Private quiz analytics** — accuracy and adaptive study-focus analytics persist across restarts until the learner confirms `/clear`.
+- 📈 **Private quiz analytics and adaptive practice** — accuracy and adaptive study-focus analytics persist across restarts until the learner confirms `/clear`; `/practice` converts the weakest recorded topic into the next source-grounded question.
 - 📖 **Resilient source retrieval** — answers use Hugging Face semantic embeddings when an owner token is configured, then fall back to local typo-tolerant fuzzy matching without sending source text to another provider. Lexical ranking remains available as an explicit opt-out fallback. Source material is treated as reference data, never as bot instructions.
 - ⚙️ **Validated circuit diagrams** — the bot validates every signal, component pin count, bit width, and dependency before drawing clean symbols and wires. It supports basic logic, 2:1 and 4:1 multiplexers, D/JK/T/SR flip-flops, 2-to-4 and 3-to-8 decoders, 4-to-2 and 8-to-3 encoders, plus configurable 2–32 bit registers with visible clock-edge markers. Unsupported timing diagrams still receive an explanation rather than a fabricated waveform.
 - 💬 **Conversation memory** — remembers recent Q&A so follow-up questions have context, while per-chat update processing keeps rapid messages and replies in order.
@@ -46,6 +46,8 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | `/help` | Show help message |
 | `/sources` | List uploaded sources with their stable removal numbers |
 | `/remove <number>` | Delete one source from the `/sources` list and reset any active quiz |
+| `/practice [topic]` | Create an adaptive source-grounded quiz from the learner’s weakest recorded topic, or use an explicit topic |
+| `/practice source <number> [topic]` | Create adaptive or explicitly targeted practice from one numbered PDF/PPTX source |
 | `/quiz [topic]` | Create one source-grounded multiple-choice practice question; reply with A–D to answer |
 | `/quiz source <number> [topic]` | Create a quiz from one numbered PDF/PPTX in `/sources`, preserving its original source number in citations |
 | `/flashcards [topic]` | Create five source-grounded study cards |
