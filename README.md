@@ -5,7 +5,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 ## Features
 
 - 📷 **Forward images or albums** (question papers, homework, notes) — pages are processed in order, with every readable question, option, formula, table, and circuit detected.
-- 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches.
+- 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches. Each learner workspace has a configurable source-storage ceiling, and `/sources` shows its current usage.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo) only when no sources are present. Source-backed questions stay source-only and are not sent to a search engine.
 - 📝 **Source-grounded quizzes and revision guides** — use `/quiz [topic]` for validated multiple-choice practice and `/studyguide [topic]` for an exam-ready overview, cited key points, practical tips, and a three-step study plan from uploaded PDF/PPTX sources.
 - 📈 **Private quiz analytics and adaptive practice** — accuracy and adaptive study-focus analytics persist across restarts until the learner confirms `/clear`; `/practice` converts the weakest recorded topic into the next source-grounded question.
@@ -84,6 +84,7 @@ npm start
 | `MAX_COMPLETION_TOKENS` | No | Maximum answer length from the text model (default `4096`) |
 | `MAX_SOURCE_CHARS` | No | Max chars of lecture sources sent to the model (default `20000`) |
 | `MAX_UPLOAD_BYTES` | No | Maximum accepted PDF/PPTX upload size in bytes (default `12582912`, or 12 MB) |
+| `MAX_STORED_SOURCE_BYTES` | No | Maximum total stored source text and image content per learner workspace (default `31457280`, or 30 MB) |
 | `MAX_IMAGE_BYTES` | No | Maximum accepted JPG/PNG/WebP image size in bytes, including forwarded photos (default `6291456`, or 6 MB) |
 | `MAX_TEXT_QUESTION_CHARS` | No | Maximum text-question or quiz-topic length (default `6000`) |
 | `MAX_SOURCES_PER_CHAT` | No | Maximum PDF/PPTX/image sources stored for one chat (default `12`) |

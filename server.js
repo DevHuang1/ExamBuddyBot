@@ -22,6 +22,7 @@ const ANSWER_TEMPERATURE = Number(process.env.ANSWER_TEMPERATURE || '0.15');
 const MAX_COMPLETION_TOKENS = parseInt(process.env.MAX_COMPLETION_TOKENS || '4096', 10);
 const MAX_SOURCE_CHARS = parseInt(process.env.MAX_SOURCE_CHARS || '20000', 10);
 const MAX_UPLOAD_BYTES = parseInt(process.env.MAX_UPLOAD_BYTES || String(12 * 1024 * 1024), 10);
+const MAX_STORED_SOURCE_BYTES = Math.max(1, parseInt(process.env.MAX_STORED_SOURCE_BYTES || String(30 * 1024 * 1024), 10) || 30 * 1024 * 1024);
 const MAX_IMAGE_BYTES = parseInt(process.env.MAX_IMAGE_BYTES || String(6 * 1024 * 1024), 10);
 const MAX_TEXT_QUESTION_CHARS = parseInt(process.env.MAX_TEXT_QUESTION_CHARS || '6000', 10);
 const MAX_SOURCES_PER_CHAT = parseInt(process.env.MAX_SOURCES_PER_CHAT || '12', 10);
@@ -639,6 +640,32 @@ function listedSources(store) {
   return [...pdfs, ...images];
 }
 
+function base64ByteLength(value) {
+  const normalized = String(value || '').replace(/\s+/g, '');
+  if (!normalized) return 0;
+  const padding = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding);
+}
+
+function storedSourceBytes(store) {
+  const textBytes = (store?.pdfs || []).reduce((total, source) => total + Buffer.byteLength(String(source?.text || ''), 'utf8'), 0);
+  const imageBytes = (store?.images || []).reduce((total, source) => total + base64ByteLength(source?.base64), 0);
+  return textBytes + imageBytes;
+}
+
+function formatStorageBytes(bytes) {
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ensureSourceStorageCapacity(store, incomingBytes, limitBytes = MAX_STORED_SOURCE_BYTES) {
+  const proposedBytes = Math.max(0, Number(incomingBytes) || 0);
+  const limit = Math.max(1, Number(limitBytes) || MAX_STORED_SOURCE_BYTES);
+  const usedBytes = storedSourceBytes(store);
+  if (usedBytes + proposedBytes <= limit) return;
+  throw new Error(`This source would exceed your workspace storage limit (${formatStorageBytes(usedBytes)} used of ${formatStorageBytes(limit)}). Remove a source with /remove <number> or use /clear before adding it.`);
+}
+
 function sourceListText(store) {
   const entries = listedSources(store);
   if (!entries.length) return 'No sources yet. Send a PDF, PPTX, or image.';
@@ -646,7 +673,8 @@ function sourceListText(store) {
     const detail = source.kind === 'Image' ? '' : ` (${source.pages || '?'} ${source.kind === 'Slides' ? 'slides' : 'pages'})`;
     return `${index + 1}. ${source.kind}: ${source.name}${detail}`;
   });
-  return `Your sources (${entries.length}):\n${lines.map(escapeHtml).join('\n')}\n\nUse <code>/remove &lt;number&gt;</code> to delete one source.`;
+  const storage = `Storage: ${formatStorageBytes(storedSourceBytes(store))} of ${formatStorageBytes(MAX_STORED_SOURCE_BYTES)}.`;
+  return `Your sources (${entries.length}):\n${lines.map(escapeHtml).join('\n')}\n\n${storage}\nUse <code>/remove &lt;number&gt;</code> to delete one source.`;
 }
 
 function parseSourceScopedTopic(args) {
@@ -1479,6 +1507,7 @@ async function handleDocument(chatId, doc, sessionKey = chatId) {
         await answerImages(chatId, pages, `Scanned PDF: ${name}`, sessionKey);
         return;
       }
+      ensureSourceStorageCapacity(store, Buffer.byteLength(parsed.text, 'utf8'));
       store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages, type: 'pdf' });
       sources.set(sessionKey, store);
       saveSources();
@@ -1488,11 +1517,13 @@ async function handleDocument(chatId, doc, sessionKey = chatId) {
       if (!parsed || !parsed.text.trim()) {
         throw new Error('No readable text found in that PPTX (it may be image-only slides).');
       }
+      ensureSourceStorageCapacity(store, Buffer.byteLength(parsed.text, 'utf8'));
       store.pdfs.push({ name, text: parsed.text, pages: parsed.pages, type: 'pptx' });
       sources.set(sessionKey, store);
       saveSources();
       await send(chatId, `📊 Added "${escapeHtml(name)}" as slides source (${store.pdfs.length} source(s), ${parsed.pages} slides). Ask me a question now.`);
     } else {
+      ensureSourceStorageCapacity(store, buf.length);
       store.images.push({ name, base64: buf.toString('base64'), mime: upload.mime });
       sources.set(sessionKey, store);
       saveSources();
@@ -1807,6 +1838,10 @@ module.exports = {
     parseSourceScopedTopic,
     selectStudySources,
     studyGuideText,
+    base64ByteLength,
+    ensureSourceStorageCapacity,
+    formatStorageBytes,
+    storedSourceBytes,
     sources,
     studySessionKey,
   },

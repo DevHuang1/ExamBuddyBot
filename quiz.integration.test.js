@@ -1039,3 +1039,25 @@ test('uses a broad source-grounded practice question before any quiz history and
   });
   assert.equal(topic.topic, 'Algebra');
 });
+
+
+test('accounts for stored source bytes and rejects additions beyond a workspace storage limit', async () => {
+  const imageBytes = Buffer.from('diagram');
+  const store = {
+    pdfs: [{ name: 'Notes.pdf', text: 'π', pages: 1, type: 'pdf' }],
+    images: [{ name: 'diagram.png', base64: imageBytes.toString('base64'), mime: 'image/png' }],
+  };
+
+  assert.equal(__test.base64ByteLength(imageBytes.toString('base64')), imageBytes.length);
+  assert.equal(__test.storedSourceBytes(store), Buffer.byteLength('π', 'utf8') + imageBytes.length);
+  assert.doesNotThrow(() => __test.ensureSourceStorageCapacity(store, 2, 12));
+  assert.throws(
+    () => __test.ensureSourceStorageCapacity(store, 4, 12),
+    /workspace storage limit.*Remove a source/i,
+  );
+
+  const { telegramCalls } = installFetchMock({});
+  __test.sources.set(CHAT_ID, store);
+  await handleUpdate(message('/sources'));
+  assert.match(telegramMessages(telegramCalls).at(-1), /Storage: 1 KB of 30\.0 MB/i);
+});
