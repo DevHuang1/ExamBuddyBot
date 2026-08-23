@@ -456,7 +456,7 @@ test('serializes updates from the same chat so replies cannot be delivered out o
 
   assert.equal(telegramMessagesSent.length, 3);
   assert.match(telegramMessagesSent[1], /clear confirm/i);
-  assert.match(telegramMessagesSent[2], /All sources, conversation memory, active quiz state, and performance analytics in your ExamBuddy workspace have been cleared/);
+  assert.match(telegramMessagesSent[2], /All sources, conversation memory, active quiz state, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared/);
 });
 
 
@@ -544,7 +544,7 @@ test('clears sources only after a pending clear request is confirmed', async () 
   assert.equal(__test.sources.has(CHAT_ID), false);
   assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
   assert.equal(__test.quizPerformance.has(CHAT_ID), false);
-  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, active quiz state, and performance analytics in your ExamBuddy workspace have been cleared/i);
+  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, active quiz state, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared/i);
 });
 
 test('does not clear sources when confirmation was not requested first', async () => {
@@ -1060,4 +1060,57 @@ test('accounts for stored source bytes and rejects additions beyond a workspace 
   __test.sources.set(CHAT_ID, store);
   await handleUpdate(message('/sources'));
   assert.match(telegramMessages(telegramCalls).at(-1), /Storage: 1 KB of 30\.0 MB/i);
+});
+
+
+test('captures incorrect quiz answers for private missed-question review and persists them safely', async () => {
+  const { telegramCalls } = installFetchMock({});
+  __test.activeQuizzes.set(CHAT_ID, {
+    topic: 'Algebra',
+    question: 'What degree does a linear equation have?',
+    choices: ['Zero', 'One', 'Two', 'Three'],
+    answerIndex: 1,
+    explanation: 'A linear equation has degree one.',
+  });
+
+  await handleUpdate(message('A'));
+  assert.equal(__test.quizMistakes.get(CHAT_ID).length, 1);
+  assert.equal(__test.quizMistakes.get(CHAT_ID)[0].correctAnswer, 'One');
+
+  await handleUpdate(message('/mistakes'));
+  const review = telegramMessages(telegramCalls).at(-1);
+  assert.match(review, /Your missed-question review/);
+  assert.match(review, /What degree does a linear equation have/);
+  assert.match(review, /Correct answer: One/);
+  assert.match(review, /Why: A linear equation has degree one/);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy-mistakes-'));
+  const store = path.join(dir, 'quiz-mistakes.json');
+  try {
+    assert.equal(__test.saveQuizMistakes(store), true);
+    __test.quizMistakes.clear();
+    assert.equal(__test.loadQuizMistakes(store), 1);
+    assert.equal(__test.quizMistakes.get(CHAT_ID)[0].question, 'What degree does a linear equation have?');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('delivers a group member’s missed-question review only to their private chat', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const aliceKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/mistakes').message);
+  __test.quizMistakes.set(aliceKey, [{
+    topic: 'Geometry',
+    question: 'What is the angle sum of a triangle?',
+    correctAnswer: '180 degrees',
+    explanation: 'A triangle has 180 degrees of interior angles.',
+  }]);
+
+  await handleUpdate(groupMessage(GROUP_ALICE_ID, '/mistakes'));
+
+  const sent = telegramCalls.filter((call) => call.url.includes('/sendMessage'));
+  assert.equal(sent[0].payload.chat_id, GROUP_ALICE_ID);
+  assert.match(sent[0].payload.text, /missed-question review/i);
+  assert.equal(sent[1].payload.chat_id, GROUP_CHAT_ID);
+  assert.match(sent[1].payload.text, /sent to you in a private chat/i);
 });

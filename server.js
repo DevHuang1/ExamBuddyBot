@@ -26,6 +26,7 @@ const MAX_STORED_SOURCE_BYTES = Math.max(1, parseInt(process.env.MAX_STORED_SOUR
 const MAX_IMAGE_BYTES = parseInt(process.env.MAX_IMAGE_BYTES || String(6 * 1024 * 1024), 10);
 const MAX_TEXT_QUESTION_CHARS = parseInt(process.env.MAX_TEXT_QUESTION_CHARS || '6000', 10);
 const MAX_SOURCES_PER_CHAT = parseInt(process.env.MAX_SOURCES_PER_CHAT || '12', 10);
+const MAX_RETAINED_QUIZ_MISTAKES = Math.max(1, parseInt(process.env.MAX_RETAINED_QUIZ_MISTAKES || '10', 10) || 10);
 const IMAGE_MIME_BY_EXTENSION = Object.freeze({
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -117,6 +118,7 @@ function renderScannedPdfPages(buf) {
 const DATA_DIR = path.join(__dirname, 'data');
 const SOURCES_FILE = resolveFile('SOURCES_FILE', 'sources.json');
 const QUIZ_PERFORMANCE_FILE = resolveFile('QUIZ_PERFORMANCE_FILE', 'quiz-performance.json');
+const QUIZ_MISTAKES_FILE = resolveFile('QUIZ_MISTAKES_FILE', 'quiz-mistakes.json');
 const UPDATE_OFFSET_FILE = resolveFile('UPDATE_OFFSET_FILE', 'update-offset.json');
 const HF_RETRIEVAL_ENABLED = process.env.HF_RETRIEVAL_ENABLED !== 'false';
 const HF_TOKEN = (process.env.HF_TOKEN || '').trim();
@@ -297,6 +299,7 @@ const HELP_TEXT =
   '/studyguide [topic] – create a cited exam revision guide\n' +
   '/studyguide source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/analytics – see your private quiz accuracy and study focus\n' +
+  '/mistakes – privately review your recent missed quiz questions\n' +
   '/limits – see your remaining study-request capacity\n' +
   '/export – download your recent chat history as a text file\n' +
   '/cancel – cancel the current quiz without deleting sources\n' +
@@ -310,6 +313,7 @@ const histories = new Map(); // sessionKey -> [{ role: 'user'|'assistant', conte
 const lastQuestions = new Map(); // sessionKey -> last text question
 const activeQuizzes = new Map(); // sessionKey -> validated multiple-choice quiz
 const quizPerformance = new Map(); // sessionKey -> session-only quiz accuracy and topic results
+const quizMistakes = new Map(); // sessionKey -> recent missed source-grounded quiz questions
 const pendingClears = new Map(); // sessionKey -> confirmation timer for destructive clearing
 const chatQueues = new Map(); // chatId -> Promise serializing incoming updates for that chat
 const modelRequestBuckets = new Map(); // sessionKey -> timestamps of reserved model calls
@@ -421,6 +425,32 @@ function recordQuizPerformance(chatId, quiz, correct) {
   summary.topics.set(topic, topicSummary);
   quizPerformance.set(chatId, summary);
   saveQuizPerformance();
+  if (!correct) recordQuizMistake(chatId, quiz);
+}
+
+function normalizeQuizMistake(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const topic = String(value.topic || '').replace(/\s+/g, ' ').trim().slice(0, 160) || 'Practice question';
+  const question = String(value.question || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+  const correctAnswer = String(value.correctAnswer || '').replace(/\s+/g, ' ').trim().slice(0, 420);
+  const explanation = String(value.explanation || '').replace(/\s+/g, ' ').trim().slice(0, 1600);
+  if (!question || !correctAnswer || !explanation) return null;
+  return { topic, question, correctAnswer, explanation };
+}
+
+function recordQuizMistake(sessionKey, quiz) {
+  const choices = Array.isArray(quiz?.choices) ? quiz.choices : [];
+  const answerIndex = Number(quiz?.answerIndex);
+  const mistake = normalizeQuizMistake({
+    topic: quiz?.topic,
+    question: quiz?.question,
+    correctAnswer: Number.isInteger(answerIndex) && choices[answerIndex] ? choices[answerIndex] : '',
+    explanation: quiz?.explanation,
+  });
+  if (!mistake) return;
+  const recent = [mistake, ...(quizMistakes.get(sessionKey) || [])].slice(0, MAX_RETAINED_QUIZ_MISTAKES);
+  quizMistakes.set(sessionKey, recent);
+  saveQuizMistakes();
 }
 
 function normalizeQuizPerformanceSummary(value) {
@@ -509,6 +539,76 @@ function saveQuizPerformance(filePath = QUIZ_PERFORMANCE_FILE) {
     console.error(`Could not save quiz performance to ${filePath}:`, err.message);
     return false;
   }
+}
+
+function serializeQuizMistakes() {
+  const serialized = {};
+  for (const [storedKey, mistakes] of quizMistakes) {
+    const sessionKey = normalizeStoredSessionKey(storedKey);
+    const normalized = Array.isArray(mistakes) ? mistakes.map(normalizeQuizMistake).filter(Boolean).slice(0, MAX_RETAINED_QUIZ_MISTAKES) : [];
+    if (sessionKey === null || !normalized.length) continue;
+    serialized[String(sessionKey)] = normalized;
+  }
+  return serialized;
+}
+
+function loadQuizMistakes(filePath = QUIZ_MISTAKES_FILE) {
+  try {
+    if (!fs.existsSync(filePath)) return 0;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Quiz mistakes store must contain a JSON object keyed by workspace.');
+    }
+    quizMistakes.clear();
+    let loaded = 0;
+    for (const [storedKey, rawMistakes] of Object.entries(parsed)) {
+      const sessionKey = normalizeStoredSessionKey(storedKey);
+      const mistakes = Array.isArray(rawMistakes) ? rawMistakes.map(normalizeQuizMistake).filter(Boolean).slice(0, MAX_RETAINED_QUIZ_MISTAKES) : [];
+      if (sessionKey === null || !mistakes.length) {
+        console.warn(`Ignoring invalid saved quiz mistakes for workspace ${storedKey}.`);
+        continue;
+      }
+      quizMistakes.set(sessionKey, mistakes);
+      loaded++;
+    }
+    console.log(`Loaded quiz mistakes from ${filePath}: ${loaded} workspace(s).`);
+    return loaded;
+  } catch (err) {
+    console.error(`Could not load quiz mistakes from ${filePath}:`, err.message);
+    return 0;
+  }
+}
+
+function saveQuizMistakes(filePath = QUIZ_MISTAKES_FILE) {
+  let temporaryFile = null;
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    temporaryFile = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+    fs.writeFileSync(temporaryFile, JSON.stringify(serializeQuizMistakes()), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(temporaryFile, filePath);
+    return true;
+  } catch (err) {
+    if (temporaryFile) fs.rmSync(temporaryFile, { force: true });
+    console.error(`Could not save quiz mistakes to ${filePath}:`, err.message);
+    return false;
+  }
+}
+
+function formatQuizMistakes(mistakes) {
+  const recent = Array.isArray(mistakes) ? mistakes.map(normalizeQuizMistake).filter(Boolean) : [];
+  if (!recent.length) return '';
+  const entries = recent.map((mistake, index) => [
+    `${index + 1}. Topic: ${mistake.topic}`,
+    `Question: ${mistake.question}`,
+    `Correct answer: ${mistake.correctAnswer}`,
+    `Why: ${mistake.explanation}`,
+  ].join('\n'));
+  return [
+    `Review your ${recent.length} most recent missed source-grounded quiz question${recent.length === 1 ? '' : 's'}.`,
+    ...entries,
+    'Use /practice to turn your weakest topic into the next targeted source-grounded question.',
+  ].join('\n\n');
 }
 
 function selectPracticeTopic(summary) {
@@ -1648,6 +1748,26 @@ async function handleUpdate(update) {
   if (cmd === '/limits' || cmd === '/usage' || cmd === '/quota') {
     return send(chatId, formatModelRequestBudget(sessionKey));
   }
+  if (cmd === '/mistakes' || cmd === '/review') {
+    const mistakes = quizMistakes.get(sessionKey) || [];
+    if (!mistakes.length) return send(chatId, 'No missed source-grounded quiz questions are available to review yet. Complete a /quiz or /practice question first.');
+    const privateRecipientId = isGroupChat(msg) ? groupMemberId(msg) : null;
+    if (isGroupChat(msg) && privateRecipientId === null) {
+      return send(chatId, 'I could not verify a member to receive this private review. Please try again from your private chat with me.');
+    }
+    try {
+      await sendLong(privateRecipientId ?? chatId, '🔁 Your missed-question review\n\n', formatQuizMistakes(mistakes));
+      if (privateRecipientId !== null) {
+        await send(chatId, 'Your private missed-question review was sent to you in a private chat.');
+      }
+    } catch (err) {
+      const detail = privateRecipientId !== null
+        ? 'I could not send that review privately. Start a private chat with me using /start, then retry /mistakes here.'
+        : `Could not send missed-question review: ${escapeHtml(err.message)}`;
+      await send(chatId, `⚠️ ${detail}`).catch(() => {});
+    }
+    return;
+  }
   if (cmd === '/analytics' || cmd === '/progress') {
     const summary = quizPerformance.get(sessionKey);
     if (!summary?.total) return send(chatId, 'No quiz answers recorded for your ExamBuddy workspace yet. Complete a source-grounded /quiz first.');
@@ -1695,9 +1815,11 @@ async function handleUpdate(update) {
     lastQuestions.delete(sessionKey);
     activeQuizzes.delete(sessionKey);
     quizPerformance.delete(sessionKey);
+    quizMistakes.delete(sessionKey);
     saveSources();
     saveQuizPerformance();
-    return send(chatId, 'All sources, conversation memory, active quiz state, and performance analytics in your ExamBuddy workspace have been cleared.');
+    saveQuizMistakes();
+    return send(chatId, 'All sources, conversation memory, active quiz state, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared.');
   }
   if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry' || cmd === '/pyanloke') {
     const q = lastQuestions.get(sessionKey);
@@ -1775,6 +1897,7 @@ async function main() {
   requireConfig();
   loadSources();
   loadQuizPerformance();
+  loadQuizMistakes();
   offset = loadUpdateOffset();
   startHealthServer();
   const me = await tg('getMe', {});
@@ -1784,6 +1907,7 @@ async function main() {
   console.log(`Semantic retrieval: ${HF_RETRIEVAL_ENABLED && HF_TOKEN ? `${HF_EMBEDDING_MODEL} via ${HF_INFERENCE_PROVIDER}, then ${FUZZY_RETRIEVAL_FALLBACK_ENABLED ? 'local fuzzy fallback' : 'lexical fallback'}` : HF_RETRIEVAL_ENABLED && FUZZY_RETRIEVAL_FALLBACK_ENABLED ? 'local fuzzy semantic fallback' : 'lexical fallback only'}`);
   console.log(`Source store: ${SOURCES_FILE}`);
   console.log(`Quiz analytics store: ${QUIZ_PERFORMANCE_FILE}`);
+  console.log(`Quiz mistakes store: ${QUIZ_MISTAKES_FILE}`);
   console.log(`Telegram update checkpoint: ${UPDATE_OFFSET_FILE} (starting offset ${offset})`);
   setInterval(poll, 1500);
   poll();
@@ -1796,6 +1920,7 @@ function resetTestState() {
   lastQuestions.clear();
   activeQuizzes.clear();
   quizPerformance.clear();
+  quizMistakes.clear();
   for (const { timer } of pendingClears.values()) clearTimeout(timer);
   pendingClears.clear();
   chatQueues.clear();
@@ -1810,9 +1935,14 @@ module.exports = {
     activeQuizzes,
     answerImages,
     quizPerformance,
+    quizMistakes,
     groupMemberId,
     isGroupChat,
     formatPerformanceAnalytics,
+    formatQuizMistakes,
+    loadQuizMistakes,
+    normalizeQuizMistake,
+    saveQuizMistakes,
     selectPracticeTopic,
     loadQuizPerformance,
     normalizeQuizPerformanceSummary,
