@@ -1114,3 +1114,50 @@ test('delivers a group member’s missed-question review only to their private c
   assert.equal(sent[1].payload.chat_id, GROUP_CHAT_ID);
   assert.match(sent[1].payload.text, /sent to you in a private chat/i);
 });
+
+
+test('removes mastered missed questions and clears only the private review data', async () => {
+  const { telegramCalls } = installFetchMock({});
+  __test.quizMistakes.set(CHAT_ID, [
+    { topic: 'Algebra', question: 'First missed question', correctAnswer: 'One', explanation: 'A linear equation has degree one.' },
+    { topic: 'Geometry', question: 'Second missed question', correctAnswer: '180 degrees', explanation: 'Triangle angles total 180 degrees.' },
+  ]);
+  __test.sources.set(CHAT_ID, {
+    pdfs: [{ name: 'Lecture.pdf', type: 'pdf', pages: 1, text: '[Page 1] Source content.' }],
+    images: [],
+  });
+  __test.quizPerformance.set(CHAT_ID, {
+    total: 1,
+    correct: 0,
+    topics: new Map([['Algebra', { total: 1, correct: 0 }]]),
+  });
+
+  await handleUpdate(message('/mistakes 1'));
+
+  assert.equal(__test.quizMistakes.get(CHAT_ID).length, 1);
+  assert.equal(__test.quizMistakes.get(CHAT_ID)[0].question, 'Second missed question');
+  assert.match(telegramMessages(telegramCalls).at(-1), /Removed missed question 1/i);
+  assert.equal(__test.sources.has(CHAT_ID), true);
+  assert.equal(__test.quizPerformance.has(CHAT_ID), true);
+
+  await handleUpdate(message('/mistakes clear'));
+
+  assert.equal(__test.quizMistakes.has(CHAT_ID), false);
+  assert.match(telegramMessages(telegramCalls).at(-1), /missed-question review was cleared/i);
+  assert.equal(__test.sources.has(CHAT_ID), true);
+  assert.equal(__test.quizPerformance.has(CHAT_ID), true);
+});
+
+test('does not remove missed questions for invalid review commands', async () => {
+  const { telegramCalls } = installFetchMock({});
+  __test.quizMistakes.set(CHAT_ID, [
+    { topic: 'Algebra', question: 'Keep this question', correctAnswer: 'One', explanation: 'A linear equation has degree one.' },
+  ]);
+
+  await handleUpdate(message('/mistakes 2'));
+  await handleUpdate(message('/mistakes anything'));
+
+  assert.equal(__test.quizMistakes.get(CHAT_ID).length, 1);
+  assert.match(telegramMessages(telegramCalls).at(-2), /There is no missed question 2/i);
+  assert.match(telegramMessages(telegramCalls).at(-1), /Usage:.*mistakes/i);
+});

@@ -56,6 +56,8 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | `/studyguide source <number> [topic]` | Create a revision guide from one numbered PDF/PPTX in `/sources`, preserving its original source number in citations |
 | `/analytics` | Show private quiz accuracy and recommended study focus; in groups, delivered to the requester’s private chat |
 | `/mistakes` | Privately review the learner’s recent missed source-grounded quiz questions, correct answers, and explanations |
+| `/mistakes <number>` | Remove one mastered item from the missed-question review |
+| `/mistakes clear` | Clear only the missed-question review while keeping sources and quiz analytics |
 | `/limits` | Show the workspace’s remaining study-request capacity without using a request |
 | `/export` | Download your recent chat history as a text file; in groups, delivered to the requester’s private chat |
 | `/cancel` | Cancel the active quiz while keeping uploaded sources |

@@ -299,7 +299,7 @@ const HELP_TEXT =
   '/studyguide [topic] – create a cited exam revision guide\n' +
   '/studyguide source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/analytics – see your private quiz accuracy and study focus\n' +
-  '/mistakes – privately review your recent missed quiz questions\n' +
+  '/mistakes [number|clear] – privately review, remove, or clear missed quiz questions\n' +
   '/limits – see your remaining study-request capacity\n' +
   '/export – download your recent chat history as a text file\n' +
   '/cancel – cancel the current quiz without deleting sources\n' +
@@ -451,6 +451,23 @@ function recordQuizMistake(sessionKey, quiz) {
   const recent = [mistake, ...(quizMistakes.get(sessionKey) || [])].slice(0, MAX_RETAINED_QUIZ_MISTAKES);
   quizMistakes.set(sessionKey, recent);
   saveQuizMistakes();
+}
+
+function removeQuizMistake(sessionKey, index) {
+  const mistakes = quizMistakes.get(sessionKey) || [];
+  if (!Number.isSafeInteger(index) || index < 0 || index >= mistakes.length) return null;
+  const [removed] = mistakes.splice(index, 1);
+  if (mistakes.length) quizMistakes.set(sessionKey, mistakes);
+  else quizMistakes.delete(sessionKey);
+  saveQuizMistakes();
+  return removed;
+}
+
+function clearQuizMistakes(sessionKey) {
+  if (!quizMistakes.has(sessionKey)) return false;
+  quizMistakes.delete(sessionKey);
+  saveQuizMistakes();
+  return true;
 }
 
 function normalizeQuizPerformanceSummary(value) {
@@ -607,7 +624,7 @@ function formatQuizMistakes(mistakes) {
   return [
     `Review your ${recent.length} most recent missed source-grounded quiz question${recent.length === 1 ? '' : 's'}.`,
     ...entries,
-    'Use /practice to turn your weakest topic into the next targeted source-grounded question.',
+    'Use /mistakes <number> to remove an item you have mastered, /mistakes clear to clear this review, or /practice to target your weakest topic next.',
   ].join('\n\n');
 }
 
@@ -1749,6 +1766,24 @@ async function handleUpdate(update) {
     return send(chatId, formatModelRequestBudget(sessionKey));
   }
   if (cmd === '/mistakes' || cmd === '/review') {
+    const action = args.trim().toLowerCase();
+    if (action === 'clear') {
+      if (!clearQuizMistakes(sessionKey)) return send(chatId, 'There are no missed quiz questions to clear in this workspace.');
+      return send(chatId, isGroupChat(msg)
+        ? 'Your private missed-question review was cleared.'
+        : 'Your missed-question review was cleared. Your quiz analytics and uploaded sources are unchanged.');
+    }
+    if (action) {
+      const requested = Number.parseInt(action, 10);
+      if (!Number.isInteger(requested) || requested < 1 || String(requested) !== action) {
+        return send(chatId, 'Usage: <code>/mistakes</code>, <code>/mistakes &lt;number&gt;</code>, or <code>/mistakes clear</code>.');
+      }
+      const removed = removeQuizMistake(sessionKey, requested - 1);
+      if (!removed) return send(chatId, `There is no missed question ${requested}. Use <code>/mistakes</code> to see the current list.`);
+      return send(chatId, isGroupChat(msg)
+        ? 'Your private missed-question review was updated.'
+        : `Removed missed question ${requested} from your review. Your quiz analytics and uploaded sources are unchanged.`);
+    }
     const mistakes = quizMistakes.get(sessionKey) || [];
     if (!mistakes.length) return send(chatId, 'No missed source-grounded quiz questions are available to review yet. Complete a /quiz or /practice question first.');
     const privateRecipientId = isGroupChat(msg) ? groupMemberId(msg) : null;
@@ -1942,6 +1977,8 @@ module.exports = {
     formatQuizMistakes,
     loadQuizMistakes,
     normalizeQuizMistake,
+    removeQuizMistake,
+    clearQuizMistakes,
     saveQuizMistakes,
     selectPracticeTopic,
     loadQuizPerformance,
