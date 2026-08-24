@@ -5,7 +5,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 ## Features
 
 - 📷 **Forward images or albums** (question papers, homework, notes) — pages are processed in order, with every readable question, option, formula, table, and circuit detected.
-- 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches. Each learner workspace has a configurable source-storage ceiling, and `/sources` shows its current usage.
+- 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches. Each learner workspace has a configurable source-storage ceiling, `/sources` shows current usage, and identical re-uploads are recognized before they can duplicate the library.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo) only when no sources are present. Source-backed questions stay source-only and are not sent to a search engine.
 - 📝 **Source-grounded quizzes and revision guides** — use `/quiz [topic]` for validated multiple-choice practice and `/studyguide [topic]` for an exam-ready overview, cited key points, practical tips, and a three-step study plan from uploaded PDF/PPTX sources.
 - 📈 **Private quiz analytics, adaptive practice, and mistake review** — accuracy, adaptive study-focus analytics, and up to ten recent missed source-grounded quiz questions persist across restarts until the learner confirms `/clear`; `/practice` targets the weakest recorded topic and `/mistakes` explains recent errors.

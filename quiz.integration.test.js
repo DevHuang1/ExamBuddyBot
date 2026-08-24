@@ -1161,3 +1161,62 @@ test('does not remove missed questions for invalid review commands', async () =>
   assert.match(telegramMessages(telegramCalls).at(-2), /There is no missed question 2/i);
   assert.match(telegramMessages(telegramCalls).at(-1), /Usage:.*mistakes/i);
 });
+
+test('detects identical uploaded-source content before it is added again', () => {
+  const firstFingerprint = __test.sourceFingerprint(Buffer.from('identical lecture bytes'));
+  const sameFingerprint = __test.sourceFingerprint(Buffer.from('identical lecture bytes'));
+  const otherFingerprint = __test.sourceFingerprint(Buffer.from('different lecture bytes'));
+  assert.equal(firstFingerprint, sameFingerprint);
+  assert.notEqual(firstFingerprint, otherFingerprint);
+
+  const store = {
+    pdfs: [{ name: 'Algebra lecture.pdf', type: 'pdf', pages: 1, text: '[Page 1] Linear equations.', fingerprint: firstFingerprint }],
+    images: [{ name: 'Diagram.png', base64: 'aW1hZ2U=', mime: 'image/png', fingerprint: otherFingerprint }],
+  };
+  const duplicate = __test.findDuplicateSource(store, sameFingerprint);
+  assert.equal(duplicate.index, 0);
+  assert.equal(duplicate.source.name, 'Algebra lecture.pdf');
+  assert.equal(__test.findDuplicateSource(store, __test.sourceFingerprint(Buffer.from('new source'))), null);
+});
+
+test('does not store an identical uploaded image source twice', async () => {
+  const telegramCalls = [];
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+  global.fetch = async (url, options = {}) => {
+    const target = String(url);
+    if (target.includes('/file/bot')) {
+      return {
+        ok: true,
+        arrayBuffer: async () => png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength),
+      };
+    }
+    if (target.includes('/getFile')) {
+      return response({ ok: true, result: { file_path: 'uploads/same-image.png' } });
+    }
+    if (target.includes('api.telegram.org')) {
+      const payload = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+      telegramCalls.push({ url: target, payload });
+      return response({ ok: true, result: {} });
+    }
+    throw new Error(`Unexpected request: ${target}`);
+  };
+  const upload = (fileId, fileName) => ({
+    message: {
+      chat: { id: CHAT_ID },
+      document: {
+        file_id: fileId,
+        file_name: fileName,
+        mime_type: 'image/png',
+        file_size: png.length,
+      },
+    },
+  });
+
+  await handleUpdate(upload('first-copy', 'notes.png'));
+  await handleUpdate(upload('second-copy', 'renamed-notes.png'));
+
+  assert.equal(__test.sources.get(CHAT_ID).images.length, 1);
+  const messages = telegramMessages(telegramCalls);
+  assert.match(messages[0], /Added .*notes\.png/i);
+  assert.match(messages[1], /already saved as source 1: notes\.png/i);
+});

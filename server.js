@@ -1,5 +1,6 @@
 require('dotenv').config();
 const fs = require('fs');
+const crypto = require('crypto');
 const http = require('http');
 const os = require('os');
 const path = require('path');
@@ -781,6 +782,17 @@ function ensureSourceStorageCapacity(store, incomingBytes, limitBytes = MAX_STOR
   const usedBytes = storedSourceBytes(store);
   if (usedBytes + proposedBytes <= limit) return;
   throw new Error(`This source would exceed your workspace storage limit (${formatStorageBytes(usedBytes)} used of ${formatStorageBytes(limit)}). Remove a source with /remove <number> or use /clear before adding it.`);
+}
+
+function sourceFingerprint(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+function findDuplicateSource(store, fingerprint) {
+  if (!fingerprint) return null;
+  const entries = listedSources(store);
+  const index = entries.findIndex((source) => source.fingerprint === fingerprint);
+  return index === -1 ? null : { index, source: entries[index] };
 }
 
 function sourceListText(store) {
@@ -1606,6 +1618,12 @@ async function handleDocument(chatId, doc, sessionKey = chatId) {
       throw new Error(`That file is too large. Please send a ${upload.kind === 'image' ? 'image' : 'file'} smaller than ${Math.floor(byteLimit / (1024 * 1024))} MB.`);
     }
     validateDocumentContent(buf, upload);
+    const fingerprint = sourceFingerprint(buf);
+    const duplicate = findDuplicateSource(store, fingerprint);
+    if (duplicate) {
+      await send(chatId, `ℹ️ This file is already saved as source ${duplicate.index + 1}: ${escapeHtml(duplicate.source.name)}. Use <code>/sources</code> to review your library.`);
+      return;
+    }
     if (upload.kind === 'pdf') {
       const tmp = path.join(os.tmpdir(), `exambuddy_${Date.now()}.pdf`);
       let parsed = null;
@@ -1625,7 +1643,7 @@ async function handleDocument(chatId, doc, sessionKey = chatId) {
         return;
       }
       ensureSourceStorageCapacity(store, Buffer.byteLength(parsed.text, 'utf8'));
-      store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages, type: 'pdf' });
+      store.pdfs.push({ name, text: parsed.text, pages: parsed.numPages, type: 'pdf', fingerprint });
       sources.set(sessionKey, store);
       saveSources();
       await send(chatId, `📄 Added "${escapeHtml(name)}" as PDF source (${store.pdfs.length} PDF source(s)). Ask me a question now.`);
@@ -1635,13 +1653,13 @@ async function handleDocument(chatId, doc, sessionKey = chatId) {
         throw new Error('No readable text found in that PPTX (it may be image-only slides).');
       }
       ensureSourceStorageCapacity(store, Buffer.byteLength(parsed.text, 'utf8'));
-      store.pdfs.push({ name, text: parsed.text, pages: parsed.pages, type: 'pptx' });
+      store.pdfs.push({ name, text: parsed.text, pages: parsed.pages, type: 'pptx', fingerprint });
       sources.set(sessionKey, store);
       saveSources();
       await send(chatId, `📊 Added "${escapeHtml(name)}" as slides source (${store.pdfs.length} source(s), ${parsed.pages} slides). Ask me a question now.`);
     } else {
       ensureSourceStorageCapacity(store, buf.length);
-      store.images.push({ name, base64: buf.toString('base64'), mime: upload.mime });
+      store.images.push({ name, base64: buf.toString('base64'), mime: upload.mime, fingerprint });
       sources.set(sessionKey, store);
       saveSources();
       await send(chatId, `🖼 Added "${escapeHtml(name)}" as image source (${store.images.length} image source(s)). Ask me a question now.`);
@@ -2007,7 +2025,9 @@ module.exports = {
     studyGuideText,
     base64ByteLength,
     ensureSourceStorageCapacity,
+    findDuplicateSource,
     formatStorageBytes,
+    sourceFingerprint,
     storedSourceBytes,
     sources,
     studySessionKey,
