@@ -1220,3 +1220,32 @@ test('does not store an identical uploaded image source twice', async () => {
   assert.match(messages[0], /Added .*notes\.png/i);
   assert.match(messages[1], /already saved as source 1: notes\.png/i);
 });
+
+
+test('reports startup, healthy, failed, recovered, and stale Telegram runtime states', () => {
+  const base = 1_000_000;
+
+  assert.deepEqual(__test.healthReport(base), {
+    status: 'starting',
+    telegram: 'starting',
+    lastTelegramSuccessAgeSeconds: null,
+  });
+
+  __test.markTelegramSuccess(base);
+  assert.deepEqual(__test.healthReport(base + 5_000), {
+    status: 'ok',
+    telegram: 'ready',
+    lastTelegramSuccessAgeSeconds: 5,
+  });
+
+  __test.markPollFailure(base + 6_000);
+  assert.deepEqual(__test.healthReport(base + 6_001), {
+    status: 'degraded',
+    telegram: 'degraded',
+    lastTelegramSuccessAgeSeconds: 6,
+  });
+
+  __test.markTelegramSuccess(base + 7_000);
+  assert.equal(__test.healthReport(base + 7_001).status, 'ok');
+  assert.equal(__test.healthReport(base + 100_001).status, 'degraded');
+});

@@ -43,6 +43,7 @@ const MAX_VISION_IMAGES_PER_REQUEST = 5;
 const MAX_SCANNED_PDF_PAGES = parseInt(process.env.MAX_SCANNED_PDF_PAGES || '15', 10);
 const PDF_RENDER_DPI = parseInt(process.env.PDF_RENDER_DPI || '160', 10);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS || '60000', 10);
+const HEALTH_STALE_AFTER_MS = Math.max(1_000, parseInt(process.env.HEALTH_STALE_AFTER_MS || '90000', 10) || 90_000);
 const MODEL_REQUEST_WINDOW_SECONDS = Math.max(1, parseInt(process.env.MODEL_REQUEST_WINDOW_SECONDS || '60', 10) || 60);
 const MAX_MODEL_REQUESTS_PER_WINDOW = Math.max(1, parseInt(process.env.MAX_MODEL_REQUESTS_PER_WINDOW || '12', 10) || 12);
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -145,11 +146,44 @@ function resolveFile(envVar, name) {
   }
 }
 
+const runtimeHealth = {
+  started: false,
+  lastTelegramSuccessAt: 0,
+  lastPollFailureAt: 0,
+};
+
+function markTelegramSuccess(now = Date.now()) {
+  runtimeHealth.started = true;
+  runtimeHealth.lastTelegramSuccessAt = now;
+  runtimeHealth.lastPollFailureAt = 0;
+}
+
+function markPollFailure(now = Date.now()) {
+  runtimeHealth.lastPollFailureAt = now;
+}
+
+function healthReport(now = Date.now()) {
+  const lastSuccess = runtimeHealth.lastTelegramSuccessAt;
+  const ageMs = lastSuccess ? Math.max(0, now - lastSuccess) : null;
+  const stale = ageMs === null || ageMs > HEALTH_STALE_AFTER_MS;
+  const failedSinceSuccess = runtimeHealth.lastPollFailureAt > lastSuccess;
+  let status = 'ok';
+  if (!runtimeHealth.started) status = 'starting';
+  else if (stale || failedSinceSuccess) status = 'degraded';
+  return {
+    status,
+    telegram: status === 'ok' ? 'ready' : status === 'starting' ? 'starting' : 'degraded',
+    lastTelegramSuccessAgeSeconds: ageMs === null ? null : Math.floor(ageMs / 1000),
+  };
+}
+
 function startHealthServer() {
   const port = process.env.PORT || 8080;
   const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ok');
+    const report = healthReport();
+    const statusCode = report.status === 'ok' ? 200 : 503;
+    res.writeHead(statusCode, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(report));
   });
   server.listen(port, () => {
     console.log(`Health server listening on :${port}`);
@@ -1927,6 +1961,7 @@ async function poll() {
   polling = true;
   try {
     const updates = await tg('getUpdates', { offset, timeout: 30 });
+    markTelegramSuccess();
     for (const update of updates) {
       const updateId = update?.update_id;
       if (!Number.isSafeInteger(updateId) || updateId < 0) {
@@ -1940,6 +1975,7 @@ async function poll() {
       enqueueUpdate(update).catch(() => {});
     }
   } catch (err) {
+    markPollFailure();
     console.error('Poll error:', err.message);
   } finally {
     polling = false;
@@ -1954,6 +1990,7 @@ async function main() {
   offset = loadUpdateOffset();
   startHealthServer();
   const me = await tg('getMe', {});
+  markTelegramSuccess();
   console.log(`🤖 ExamBuddy bot running as @${me.username}`);
   console.log(`Answer model: ${ANSWER_MODEL} | Vision model: ${VISION_MODEL}`);
   console.log(`Owner-managed Groq key: ${GROQ_API_KEY ? 'configured' : 'missing'} | ${TAVILY_API_KEY ? 'Tavily search' : 'DuckDuckGo search'}`);
@@ -1978,6 +2015,9 @@ function resetTestState() {
   pendingClears.clear();
   chatQueues.clear();
   modelRequestBuckets.clear();
+  runtimeHealth.started = false;
+  runtimeHealth.lastTelegramSuccessAt = 0;
+  runtimeHealth.lastPollFailureAt = 0;
   offset = 0;
   polling = false;
 }
@@ -1987,6 +2027,9 @@ module.exports = {
   __test: {
     activeQuizzes,
     answerImages,
+    healthReport,
+    markPollFailure,
+    markTelegramSuccess,
     quizPerformance,
     quizMistakes,
     groupMemberId,

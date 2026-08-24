@@ -94,6 +94,7 @@ npm start
 | `MAX_SCANNED_PDF_PAGES` | No | Maximum image-only PDF pages processed with vision fallback (default `15`) |
 | `PDF_RENDER_DPI` | No | Rasterization quality for scanned PDF detection (default `160`) |
 | `REQUEST_TIMEOUT_MS` | No | Maximum wait for Telegram, model, and search requests before returning a clear error (default `60000`) |
+| `HEALTH_STALE_AFTER_MS` | No | How long since the last successful Telegram request before health reporting becomes degraded (default `90000`) |
 | `MAX_MODEL_REQUESTS_PER_WINDOW` | No | Maximum model calls accepted per learner workspace in the rolling request window, including each vision batch (default `12`) |
 | `MODEL_REQUEST_WINDOW_SECONDS` | No | Duration of the rolling model-request window in seconds (default `60`) |
 | `HF_RETRIEVAL_ENABLED` | No | Enables semantic source reranking (default `true`) |
@@ -114,7 +115,7 @@ docker build -t exambuddybot .
 docker run -d --env-file .env -e PORT=8080 -p 8080:8080 exambuddybot
 ```
 
-The container exposes a health endpoint on `PORT` (returns `ok`) so Railway marks the service as healthy. Uploaded-source writes and the Telegram update checkpoint are performed atomically, reducing the risk of partial state after an interrupted save and preventing already-seen updates from being reprocessed after a restart. Source libraries use stable workspace keys, preserving private-chat compatibility while isolating each group participant’s data. Each workspace also receives a configurable rolling model-request budget before a model call begins; vision batches consume one slot each, preventing a single burst from exhausting shared deployment capacity. If `HF_TOKEN` is configured, the bot first calls Hugging Face Inference Providers for semantic source retrieval; when no token is configured or the remote provider fails, it uses local typo-tolerant matching without an additional dependency or external source-text request.
+The container exposes a JSON health endpoint on `PORT`. It returns `200` only after a successful Telegram connection and returns `503` while starting, after a polling failure, or when Telegram connectivity has been stale longer than `HEALTH_STALE_AFTER_MS`; this gives Railway an accurate readiness signal. Uploaded-source writes and the Telegram update checkpoint are performed atomically, reducing the risk of partial state after an interrupted save and preventing already-seen updates from being reprocessed after a restart. Source libraries use stable workspace keys, preserving private-chat compatibility while isolating each group participant’s data. Each workspace also receives a configurable rolling model-request budget before a model call begins; vision batches consume one slot each, preventing a single burst from exhausting shared deployment capacity. If `HF_TOKEN` is configured, the bot first calls Hugging Face Inference Providers for semantic source retrieval; when no token is configured or the remote provider fails, it uses local typo-tolerant matching without an additional dependency or external source-text request.
 
 ## Deploy to Railway
 
