@@ -1266,3 +1266,23 @@ test('reports startup, healthy, failed, recovered, and stale Telegram runtime st
   assert.equal(__test.healthReport(base + 7_001).status, 'ok');
   assert.equal(__test.healthReport(base + 100_001).status, 'degraded');
 });
+
+
+test('ignores edited Telegram messages so they cannot repeat study actions', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+  const edited = {
+    edited_message: {
+      chat: { id: CHAT_ID },
+      from: { id: 777 },
+      text: 'Explain linear equations',
+    },
+  };
+
+  await handleUpdate(edited);
+  await __test.enqueueUpdate(edited);
+
+  assert.equal(__test.updateQueueKey(edited), null);
+  assert.equal(groqCalls.length, 0);
+  assert.equal(telegramCalls.length, 0);
+  assert.equal(__test.histories.has(CHAT_ID), false);
+});

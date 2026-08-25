@@ -1726,7 +1726,8 @@ async function handleDocument(chatId, doc, sessionKey = chatId) {
 // ---------- update dispatch ----------
 
 async function handleUpdate(update) {
-  const msg = update.message || update.edited_message;
+  // Telegram may resend an edited message as a new update. Only original messages can trigger costly study actions.
+  const msg = update?.message;
   if (!msg || !msg.chat) return;
   const chatId = msg.chat.id;
   const sessionKey = studySessionKey(msg);
@@ -1955,7 +1956,7 @@ async function handleUpdate(update) {
 // ---------- polling ----------
 
 function updateQueueKey(update) {
-  const msg = update?.message || update?.edited_message;
+  const msg = update?.message;
   const sessionKey = studySessionKey(msg);
   if (sessionKey !== null) return sessionKey;
   const chatId = msg?.chat?.id;
