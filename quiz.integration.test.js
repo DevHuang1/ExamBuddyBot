@@ -1023,8 +1023,10 @@ test('uses the weakest private quiz topic for adaptive practice and creates a so
 
   assert.equal(groqCalls.length, 1);
   assert.match(groqCalls[0].messages.at(-1).content[0].text, /Requested focus: Geometry/i);
+  assert.match(groqCalls[0].messages.at(-1).content[0].text, /Requested difficulty: foundational/i);
   const replies = telegramMessages(telegramCalls);
   assert.match(replies[0], /Targeting Geometry: 0\/1 correct \(0%\), your lowest recorded topic/i);
+  assert.match(replies[0], /Difficulty: <b>foundational<\/b>/i);
   assert.match(replies.at(-1), /Practice quiz: Geometry/);
 });
 
@@ -1040,6 +1042,21 @@ test('uses a broad source-grounded practice question before any quiz history and
   assert.equal(topic.topic, 'Algebra');
 });
 
+
+test('calibrates adaptive quiz difficulty from per-topic performance', () => {
+  assert.equal(__test.selectQuizDifficulty(undefined, 'Algebra').level, 'foundational');
+  const summary = {
+    total: 12,
+    topics: new Map([
+      ['Algebra', { total: 4, correct: 1 }],
+      ['Geometry', { total: 4, correct: 3 }],
+      ['Biology', { total: 4, correct: 4 }],
+    ]),
+  };
+  assert.equal(__test.selectQuizDifficulty(summary, 'Algebra').level, 'foundational');
+  assert.equal(__test.selectQuizDifficulty(summary, 'Geometry').level, 'standard');
+  assert.equal(__test.selectQuizDifficulty(summary, 'Biology').level, 'challenge');
+});
 
 test('accounts for stored source bytes and rejects additions beyond a workspace storage limit', async () => {
   const imageBytes = Buffer.from('diagram');

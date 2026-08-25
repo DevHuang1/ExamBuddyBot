@@ -211,6 +211,7 @@ const VISION_PROMPT =
 
 const QUIZ_PROMPT =
   'You create one reliable multiple-choice practice question using ONLY the provided lecture-source context. ' +
+  'Respect the requested difficulty: foundational questions test direct definitions or identification, standard questions require a clear application, and challenge questions require careful multi-step reasoning supported entirely by the sources. ' +
   'Use exactly four plausible choices, put the zero-based correct choice in answerIndex, and write a brief explanation grounded in the source. ' +
   'If the source context is insufficient, set status to insufficient_source and leave all question fields as empty strings or arrays. ' +
   'Do not mention that you are an AI.';
@@ -680,6 +681,21 @@ function selectPracticeTopic(summary) {
   };
 }
 
+function selectQuizDifficulty(summary, topic = '') {
+  const topicStats = topic && summary?.topics instanceof Map ? summary.topics.get(topic) : null;
+  if (!topicStats || topicStats.total < 2) {
+    return { level: 'foundational', reason: 'Using foundational difficulty while more performance evidence is collected.' };
+  }
+  const accuracy = Math.round((topicStats.correct / topicStats.total) * 100);
+  if (accuracy < 55) {
+    return { level: 'foundational', reason: `Using foundational difficulty after ${topicStats.correct}/${topicStats.total} correct (${accuracy}%).` };
+  }
+  if (accuracy < 80) {
+    return { level: 'standard', reason: `Using standard difficulty after ${topicStats.correct}/${topicStats.total} correct (${accuracy}%).` };
+  }
+  return { level: 'challenge', reason: `Using challenge difficulty after ${topicStats.correct}/${topicStats.total} correct (${accuracy}%).` };
+}
+
 function formatPerformanceAnalytics(summary) {
   if (!summary?.total) return '';
   const accuracy = Math.round((summary.correct / summary.total) * 100);
@@ -1058,7 +1074,7 @@ function studyGuideText(guide) {
   ].join('\n\n');
 }
 
-async function createQuiz(chatId, topic, sessionKey = chatId, sourceNumber = null) {
+async function createQuiz(chatId, topic, sessionKey = chatId, sourceNumber = null, difficulty = 'standard') {
   const store = sources.get(sessionKey) || { pdfs: [], images: [] };
   const selected = selectStudySources(store, sourceNumber);
   if (selected.error) {
@@ -1073,8 +1089,10 @@ async function createQuiz(chatId, topic, sessionKey = chatId, sourceNumber = nul
 
   if (!await reserveModelRequests(chatId, sessionKey)) return;
   await typing(chatId);
+  const validDifficulty = ['foundational', 'standard', 'challenge'].includes(difficulty) ? difficulty : 'standard';
   const request = [
     `Requested focus: ${topic || 'choose an important concept from the uploaded sources'}.`,
+    `Requested difficulty: ${validDifficulty}.`,
     'Lecture-source context:',
     context,
   ].join('\n\n');
@@ -1753,10 +1771,12 @@ async function handleUpdate(update) {
     if (scoped.topic.length > MAX_TEXT_QUESTION_CHARS) {
       return send(chatId, `Please keep the practice topic under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters.`);
     }
-    const adaptive = scoped.topic ? { topic: scoped.topic, reason: `Targeting your requested topic: ${scoped.topic}.` } : selectPracticeTopic(quizPerformance.get(sessionKey));
-    await send(chatId, `🎯 Adaptive practice: ${escapeHtml(adaptive.reason)}`);
+    const summary = quizPerformance.get(sessionKey);
+    const adaptive = scoped.topic ? { topic: scoped.topic, reason: `Targeting your requested topic: ${scoped.topic}.` } : selectPracticeTopic(summary);
+    const difficulty = selectQuizDifficulty(summary, adaptive.topic);
+    await send(chatId, `🎯 Adaptive practice: ${escapeHtml(adaptive.reason)}\nDifficulty: <b>${escapeHtml(difficulty.level)}</b>. ${escapeHtml(difficulty.reason)}`);
     try {
-      return await createQuiz(chatId, adaptive.topic, sessionKey, scoped.sourceNumber);
+      return await createQuiz(chatId, adaptive.topic, sessionKey, scoped.sourceNumber, difficulty.level);
     } catch (err) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
@@ -2042,6 +2062,7 @@ module.exports = {
     clearQuizMistakes,
     saveQuizMistakes,
     selectPracticeTopic,
+    selectQuizDifficulty,
     loadQuizPerformance,
     normalizeQuizPerformanceSummary,
     consumeModelRequestSlots,
