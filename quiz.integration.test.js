@@ -457,7 +457,7 @@ test('serializes updates from the same chat so replies cannot be delivered out o
 
   assert.equal(telegramMessagesSent.length, 3);
   assert.match(telegramMessagesSent[1], /clear confirm/i);
-  assert.match(telegramMessagesSent[2], /All sources, conversation memory, active quiz state, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared/);
+  assert.match(telegramMessagesSent[2], /All sources, conversation memory, active quiz state, flashcard exports, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared/);
 });
 
 
@@ -545,7 +545,7 @@ test('clears sources only after a pending clear request is confirmed', async () 
   assert.equal(__test.sources.has(CHAT_ID), false);
   assert.equal(__test.activeQuizzes.has(CHAT_ID), false);
   assert.equal(__test.quizPerformance.has(CHAT_ID), false);
-  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, active quiz state, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared/i);
+  assert.match(telegramMessages(telegramCalls).at(-1), /All sources, conversation memory, active quiz state, flashcard exports, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared/i);
 });
 
 test('does not clear sources when confirmation was not requested first', async () => {
@@ -1343,4 +1343,49 @@ test('ignores edited Telegram messages so they cannot repeat study actions', asy
   assert.equal(groqCalls.length, 0);
   assert.equal(telegramCalls.length, 0);
   assert.equal(__test.histories.has(CHAT_ID), false);
+});
+
+
+test('persists latest flashcard exports across restarts and preserves workspace isolation', async () => {
+  const flashcards = (topic) => ({
+    topic,
+    cards: Array.from({ length: 5 }, (_, index) => ({
+      front: `${topic} concept ${index + 1}?`,
+      back: `${topic} answer ${index + 1}.`,
+      source: 'PDF 1, page 1',
+    })),
+  });
+  const groupKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/flashcards export').message);
+  __test.lastFlashcardSets.set(CHAT_ID, flashcards('Algebra'));
+  __test.lastFlashcardSets.set(groupKey, flashcards('Geometry'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy-flashcards-'));
+  const store = path.join(dir, 'flashcard-sets.json');
+
+  try {
+    assert.equal(__test.saveLastFlashcardSets(store), true);
+    __test.lastFlashcardSets.clear();
+    assert.equal(__test.loadLastFlashcardSets(store), 2);
+    assert.equal(__test.lastFlashcardSets.get(CHAT_ID).topic, 'Algebra');
+    assert.equal(__test.lastFlashcardSets.get(groupKey).topic, 'Geometry');
+
+    const { telegramCalls } = installFetchMock({});
+    await handleUpdate(message('/flashcards export'));
+    const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+    assert.ok(exportCall);
+    assert.match(await exportCall.body.get('document').text(), /Topic: Algebra/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ignores malformed persisted flashcard sets safely', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy-flashcards-invalid-'));
+  const store = path.join(dir, 'flashcard-sets.json');
+  try {
+    fs.writeFileSync(store, JSON.stringify({ [CHAT_ID]: { topic: 'Algebra', cards: [] } }));
+    assert.equal(__test.loadLastFlashcardSets(store), 0);
+    assert.equal(__test.lastFlashcardSets.has(CHAT_ID), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

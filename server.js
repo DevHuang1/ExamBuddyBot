@@ -121,6 +121,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const SOURCES_FILE = resolveFile('SOURCES_FILE', 'sources.json');
 const QUIZ_PERFORMANCE_FILE = resolveFile('QUIZ_PERFORMANCE_FILE', 'quiz-performance.json');
 const QUIZ_MISTAKES_FILE = resolveFile('QUIZ_MISTAKES_FILE', 'quiz-mistakes.json');
+const FLASHCARD_SETS_FILE = resolveFile('FLASHCARD_SETS_FILE', 'flashcard-sets.json');
 const UPDATE_OFFSET_FILE = resolveFile('UPDATE_OFFSET_FILE', 'update-offset.json');
 const HF_RETRIEVAL_ENABLED = process.env.HF_RETRIEVAL_ENABLED !== 'false';
 const HF_TOKEN = (process.env.HF_TOKEN || '').trim();
@@ -349,7 +350,7 @@ const albums = new Map();  // mediaGroupId -> { chatId, photos: [{base64,mime}],
 const histories = new Map(); // sessionKey -> [{ role: 'user'|'assistant', content }]
 const lastQuestions = new Map(); // sessionKey -> last text question
 const activeQuizzes = new Map(); // sessionKey -> validated multiple-choice quiz
-const lastFlashcardSets = new Map(); // sessionKey -> latest validated flashcard set, retained for private export during this runtime
+const lastFlashcardSets = new Map(); // sessionKey -> latest validated flashcard set, retained for private export across restarts
 const quizPerformance = new Map(); // sessionKey -> session-only quiz accuracy and topic results
 const quizMistakes = new Map(); // sessionKey -> recent missed source-grounded quiz questions
 const pendingClears = new Map(); // sessionKey -> confirmation timer for destructive clearing
@@ -650,6 +651,68 @@ function saveQuizMistakes(filePath = QUIZ_MISTAKES_FILE) {
   }
 }
 
+function normalizeStoredFlashcardSet(value) {
+  try {
+    return normalizeFlashcards(value);
+  } catch {
+    return null;
+  }
+}
+
+function serializeLastFlashcardSets() {
+  const serialized = {};
+  for (const [storedKey, flashcards] of lastFlashcardSets) {
+    const sessionKey = normalizeStoredSessionKey(storedKey);
+    const normalized = normalizeStoredFlashcardSet(flashcards);
+    if (sessionKey === null || !normalized) continue;
+    serialized[String(sessionKey)] = normalized;
+  }
+  return serialized;
+}
+
+function loadLastFlashcardSets(filePath = FLASHCARD_SETS_FILE) {
+  try {
+    if (!fs.existsSync(filePath)) return 0;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Flashcard store must contain a JSON object keyed by workspace.');
+    }
+    lastFlashcardSets.clear();
+    let loaded = 0;
+    for (const [storedKey, value] of Object.entries(parsed)) {
+      const sessionKey = normalizeStoredSessionKey(storedKey);
+      const flashcards = normalizeStoredFlashcardSet(value);
+      if (sessionKey === null || !flashcards) {
+        console.warn(`Ignoring invalid saved flashcards for workspace ${storedKey}.`);
+        continue;
+      }
+      lastFlashcardSets.set(sessionKey, flashcards);
+      loaded++;
+    }
+    console.log(`Loaded flashcard sets from ${filePath}: ${loaded} workspace(s).`);
+    return loaded;
+  } catch (err) {
+    console.error(`Could not load flashcard sets from ${filePath}:`, err.message);
+    return 0;
+  }
+}
+
+function saveLastFlashcardSets(filePath = FLASHCARD_SETS_FILE) {
+  let temporaryFile = null;
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    temporaryFile = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+    fs.writeFileSync(temporaryFile, JSON.stringify(serializeLastFlashcardSets()), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(temporaryFile, filePath);
+    return true;
+  } catch (err) {
+    if (temporaryFile) fs.rmSync(temporaryFile, { force: true });
+    console.error(`Could not save flashcard sets to ${filePath}:`, err.message);
+    return false;
+  }
+}
+
 function formatQuizMistakes(mistakes) {
   const recent = Array.isArray(mistakes) ? mistakes.map(normalizeQuizMistake).filter(Boolean) : [];
   if (!recent.length) return '';
@@ -894,6 +957,7 @@ function removeListedSource(chatId, index) {
   else sources.set(chatId, store);
   activeQuizzes.delete(chatId);
   lastFlashcardSets.delete(chatId);
+  saveLastFlashcardSets();
   saveSources();
   return source;
 }
@@ -1165,6 +1229,7 @@ async function createFlashcards(chatId, topic, sessionKey = chatId, sourceNumber
     throw new Error(`Flashcard creation failed safely: ${err.message}`);
   }
   lastFlashcardSets.set(sessionKey, flashcards);
+  saveLastFlashcardSets();
   await sendLong(chatId, '🗂 Flashcards from your sources\n\n', flashcardText(flashcards));
 }
 
@@ -1959,9 +2024,10 @@ async function handleUpdate(update) {
     quizPerformance.delete(sessionKey);
     quizMistakes.delete(sessionKey);
     saveSources();
+    saveLastFlashcardSets();
     saveQuizPerformance();
     saveQuizMistakes();
-    return send(chatId, 'All sources, conversation memory, active quiz state, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared.');
+    return send(chatId, 'All sources, conversation memory, active quiz state, flashcard exports, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared.');
   }
   if (cmd === '/rethink' || cmd === '/redo' || cmd === '/retry' || cmd === '/pyanloke') {
     const q = lastQuestions.get(sessionKey);
@@ -2042,6 +2108,7 @@ async function main() {
   loadSources();
   loadQuizPerformance();
   loadQuizMistakes();
+  loadLastFlashcardSets();
   offset = loadUpdateOffset();
   startHealthServer();
   const me = await tg('getMe', {});
@@ -2093,11 +2160,14 @@ module.exports = {
     isGroupChat,
     formatPerformanceAnalytics,
     formatQuizMistakes,
+    loadLastFlashcardSets,
     loadQuizMistakes,
     normalizeQuizMistake,
     removeQuizMistake,
     clearQuizMistakes,
+    saveLastFlashcardSets,
     saveQuizMistakes,
+    serializeLastFlashcardSets,
     selectPracticeTopic,
     selectQuizDifficulty,
     loadQuizPerformance,
