@@ -332,6 +332,7 @@ const HELP_TEXT =
   '/quiz source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/flashcards [topic] – create five source-grounded study cards\n' +
   '/flashcards source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
+  '/flashcards export – privately download your latest flashcards\n' +
   '/studyguide [topic] – create a cited exam revision guide\n' +
   '/studyguide source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/analytics – see your private quiz accuracy and study focus\n' +
@@ -348,6 +349,7 @@ const albums = new Map();  // mediaGroupId -> { chatId, photos: [{base64,mime}],
 const histories = new Map(); // sessionKey -> [{ role: 'user'|'assistant', content }]
 const lastQuestions = new Map(); // sessionKey -> last text question
 const activeQuizzes = new Map(); // sessionKey -> validated multiple-choice quiz
+const lastFlashcardSets = new Map(); // sessionKey -> latest validated flashcard set, retained for private export during this runtime
 const quizPerformance = new Map(); // sessionKey -> session-only quiz accuracy and topic results
 const quizMistakes = new Map(); // sessionKey -> recent missed source-grounded quiz questions
 const pendingClears = new Map(); // sessionKey -> confirmation timer for destructive clearing
@@ -891,6 +893,7 @@ function removeListedSource(chatId, index) {
   if (!store.pdfs.length && !store.images.length) sources.delete(chatId);
   else sources.set(chatId, store);
   activeQuizzes.delete(chatId);
+  lastFlashcardSets.delete(chatId);
   saveSources();
   return source;
 }
@@ -1060,6 +1063,15 @@ function flashcardText(flashcards) {
   return `Flashcards: ${flashcards.topic}\n\n${cards.join('\n\n')}`;
 }
 
+function formatFlashcardExport(flashcards) {
+  return [
+    'ExamBuddy source-grounded flashcards',
+    `Topic: ${flashcards.topic}`,
+    'Review the front first, then check the back and source citation.',
+    flashcardText(flashcards),
+  ].join('\n\n').trim() + '\n';
+}
+
 function studyGuideText(guide) {
   const keyPoints = guide.keyPoints.map((item, index) =>
     `${index + 1}. ${item.point}\nSource: ${item.source}`).join('\n\n');
@@ -1152,6 +1164,7 @@ async function createFlashcards(chatId, topic, sessionKey = chatId, sourceNumber
   } catch (err) {
     throw new Error(`Flashcard creation failed safely: ${err.message}`);
   }
+  lastFlashcardSets.set(sessionKey, flashcards);
   await sendLong(chatId, '🗂 Flashcards from your sources\n\n', flashcardText(flashcards));
 }
 
@@ -1793,6 +1806,26 @@ async function handleUpdate(update) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
   }
+  if (cmd === '/flashcards' && /^export$/i.test(args.trim())) {
+    const flashcards = lastFlashcardSets.get(sessionKey);
+    if (!flashcards) return send(chatId, 'No generated flashcards are available to export yet. Create a source-grounded set with <code>/flashcards</code> first.');
+    const privateRecipientId = isGroupChat(msg) ? groupMemberId(msg) : null;
+    if (isGroupChat(msg) && privateRecipientId === null) {
+      return send(chatId, 'I could not verify a member to receive this private flashcard export. Please try again from your private chat with me.');
+    }
+    try {
+      await sendDocument(privateRecipientId ?? chatId, formatFlashcardExport(flashcards), 'exambuddy-flashcards.txt', 'Your latest ExamBuddy flashcards.');
+      if (privateRecipientId !== null) {
+        await send(chatId, 'Your latest flashcards were sent to you in a private chat.');
+      }
+    } catch (err) {
+      const detail = privateRecipientId !== null
+        ? 'I could not send that export privately. Start a private chat with me using /start, then retry /flashcards export here.'
+        : `Could not export flashcards: ${escapeHtml(err.message)}`;
+      await send(chatId, `⚠️ ${detail}`).catch(() => {});
+    }
+    return;
+  }
   if (cmd === '/flashcards') {
     const scoped = parseSourceScopedTopic(args);
     if (scoped.topic.length > MAX_TEXT_QUESTION_CHARS) {
@@ -1922,6 +1955,7 @@ async function handleUpdate(update) {
     histories.delete(sessionKey);
     lastQuestions.delete(sessionKey);
     activeQuizzes.delete(sessionKey);
+    lastFlashcardSets.delete(sessionKey);
     quizPerformance.delete(sessionKey);
     quizMistakes.delete(sessionKey);
     saveSources();
@@ -2030,6 +2064,7 @@ function resetTestState() {
   histories.clear();
   lastQuestions.clear();
   activeQuizzes.clear();
+  lastFlashcardSets.clear();
   quizPerformance.clear();
   quizMistakes.clear();
   for (const { timer } of pendingClears.values()) clearTimeout(timer);
@@ -2048,6 +2083,7 @@ module.exports = {
   __test: {
     activeQuizzes,
     answerImages,
+    lastFlashcardSets,
     healthReport,
     markPollFailure,
     markTelegramSuccess,
@@ -2087,6 +2123,8 @@ module.exports = {
     splitMessageText,
     parseSourceScopedTopic,
     selectStudySources,
+    flashcardText,
+    formatFlashcardExport,
     studyGuideText,
     base64ByteLength,
     ensureSourceStorageCapacity,

@@ -248,6 +248,7 @@ test('generates five source-cited flashcards from uploaded sources', async () =>
   assert.match(output, /Flashcards: Algebra/);
   assert.match(output, /Front: Algebra concept 1/);
   assert.match(output, /Source: PDF 1, page 1/);
+  assert.equal(__test.lastFlashcardSets.get(CHAT_ID).cards.length, 5);
 });
 
 test('rejects malformed flashcard output without sending uncited cards', async () => {
@@ -639,6 +640,39 @@ test('exports only the requesting chat’s retained history as a text document',
   assert.doesNotMatch(text, /Private message from another chat/);
 });
 
+test('exports the latest validated flashcards as a reusable text document', async () => {
+  const { telegramCalls } = installFetchMock({});
+  __test.lastFlashcardSets.set(CHAT_ID, {
+    topic: 'Algebra',
+    cards: Array.from({ length: 5 }, (_, index) => ({
+      front: `Concept ${index + 1}?`,
+      back: `Answer ${index + 1}.`,
+      source: 'PDF 1, page 1',
+    })),
+  });
+
+  await handleUpdate(message('/flashcards export'));
+
+  const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+  assert.ok(exportCall);
+  assert.equal(exportCall.body.get('chat_id'), String(CHAT_ID));
+  assert.equal(exportCall.body.get('document').name, 'exambuddy-flashcards.txt');
+  const text = await exportCall.body.get('document').text();
+  assert.match(text, /ExamBuddy source-grounded flashcards/);
+  assert.match(text, /Topic: Algebra/);
+  assert.match(text, /Front: Concept 1/);
+  assert.match(text, /Source: PDF 1, page 1/);
+});
+
+test('reports safely when no flashcards are available to export', async () => {
+  const { telegramCalls } = installFetchMock({});
+
+  await handleUpdate(message('/flashcards export'));
+
+  assert.equal(telegramCalls.filter((call) => call.url.includes('/sendDocument')).length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /No generated flashcards are available to export yet/i);
+});
+
 test('does not create a document when there is no chat history to export', async () => {
   const { telegramCalls } = installFetchMock({});
 
@@ -747,6 +781,30 @@ test('isolates each group participant’s sources and study state', async () => 
   assert.equal(__test.quizPerformance.has(bobKey), true);
 });
 
+
+test('delivers a group participant’s latest flashcard export only to their private chat', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const aliceKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/flashcards export').message);
+  __test.lastFlashcardSets.set(aliceKey, {
+    topic: 'Geometry',
+    cards: Array.from({ length: 5 }, (_, index) => ({
+      front: `Geometry ${index + 1}?`,
+      back: `Answer ${index + 1}.`,
+      source: 'PDF 1, page 2',
+    })),
+  });
+
+  await handleUpdate(groupMessage(GROUP_ALICE_ID, '/flashcards export'));
+
+  const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+  assert.ok(exportCall);
+  assert.equal(exportCall.body.get('chat_id'), String(GROUP_ALICE_ID));
+  assert.match(await exportCall.body.get('document').text(), /Topic: Geometry/);
+  const groupConfirmation = telegramCalls
+    .filter((call) => call.url.includes('/sendMessage') && call.payload.chat_id === GROUP_CHAT_ID)
+    .at(-1);
+  assert.match(groupConfirmation.payload.text, /latest flashcards were sent to you in a private chat/i);
+});
 
 test('delivers a group participant’s history export only to their private chat', async () => {
   const { telegramCalls } = installFetchMock({});
