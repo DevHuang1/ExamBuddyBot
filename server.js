@@ -122,6 +122,7 @@ const SOURCES_FILE = resolveFile('SOURCES_FILE', 'sources.json');
 const QUIZ_PERFORMANCE_FILE = resolveFile('QUIZ_PERFORMANCE_FILE', 'quiz-performance.json');
 const QUIZ_MISTAKES_FILE = resolveFile('QUIZ_MISTAKES_FILE', 'quiz-mistakes.json');
 const FLASHCARD_SETS_FILE = resolveFile('FLASHCARD_SETS_FILE', 'flashcard-sets.json');
+const STUDY_GUIDES_FILE = resolveFile('STUDY_GUIDES_FILE', 'study-guides.json');
 const UPDATE_OFFSET_FILE = resolveFile('UPDATE_OFFSET_FILE', 'update-offset.json');
 const HF_RETRIEVAL_ENABLED = process.env.HF_RETRIEVAL_ENABLED !== 'false';
 const HF_TOKEN = (process.env.HF_TOKEN || '').trim();
@@ -336,6 +337,7 @@ const HELP_TEXT =
   '/flashcards export – privately download your latest flashcards\n' +
   '/studyguide [topic] – create a cited exam revision guide\n' +
   '/studyguide source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
+  '/studyguide export – privately download your latest revision guide\n' +
   '/analytics – see your private quiz accuracy and study focus\n' +
   '/mistakes [number|clear] – privately review, remove, or clear missed quiz questions\n' +
   '/limits – see your remaining study-request capacity\n' +
@@ -351,6 +353,7 @@ const histories = new Map(); // sessionKey -> [{ role: 'user'|'assistant', conte
 const lastQuestions = new Map(); // sessionKey -> last text question
 const activeQuizzes = new Map(); // sessionKey -> validated multiple-choice quiz
 const lastFlashcardSets = new Map(); // sessionKey -> latest validated flashcard set, retained for private export across restarts
+const lastStudyGuides = new Map(); // sessionKey -> latest validated source-cited study guide, retained for private export across restarts
 const quizPerformance = new Map(); // sessionKey -> session-only quiz accuracy and topic results
 const quizMistakes = new Map(); // sessionKey -> recent missed source-grounded quiz questions
 const pendingClears = new Map(); // sessionKey -> confirmation timer for destructive clearing
@@ -713,6 +716,68 @@ function saveLastFlashcardSets(filePath = FLASHCARD_SETS_FILE) {
   }
 }
 
+function normalizeStoredStudyGuide(value) {
+  try {
+    return normalizeStudyGuide(value);
+  } catch {
+    return null;
+  }
+}
+
+function serializeLastStudyGuides() {
+  const serialized = {};
+  for (const [storedKey, guide] of lastStudyGuides) {
+    const sessionKey = normalizeStoredSessionKey(storedKey);
+    const normalized = normalizeStoredStudyGuide(guide);
+    if (sessionKey === null || !normalized) continue;
+    serialized[String(sessionKey)] = normalized;
+  }
+  return serialized;
+}
+
+function loadLastStudyGuides(filePath = STUDY_GUIDES_FILE) {
+  try {
+    if (!fs.existsSync(filePath)) return 0;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Study guide store must contain a JSON object keyed by workspace.');
+    }
+    lastStudyGuides.clear();
+    let loaded = 0;
+    for (const [storedKey, value] of Object.entries(parsed)) {
+      const sessionKey = normalizeStoredSessionKey(storedKey);
+      const guide = normalizeStoredStudyGuide(value);
+      if (sessionKey === null || !guide) {
+        console.warn(`Ignoring invalid saved study guide for workspace ${storedKey}.`);
+        continue;
+      }
+      lastStudyGuides.set(sessionKey, guide);
+      loaded++;
+    }
+    console.log(`Loaded study guides from ${filePath}: ${loaded} workspace(s).`);
+    return loaded;
+  } catch (err) {
+    console.error(`Could not load study guides from ${filePath}:`, err.message);
+    return 0;
+  }
+}
+
+function saveLastStudyGuides(filePath = STUDY_GUIDES_FILE) {
+  let temporaryFile = null;
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    temporaryFile = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+    fs.writeFileSync(temporaryFile, JSON.stringify(serializeLastStudyGuides()), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(temporaryFile, filePath);
+    return true;
+  } catch (err) {
+    if (temporaryFile) fs.rmSync(temporaryFile, { force: true });
+    console.error(`Could not save study guides to ${filePath}:`, err.message);
+    return false;
+  }
+}
+
 function formatQuizMistakes(mistakes) {
   const recent = Array.isArray(mistakes) ? mistakes.map(normalizeQuizMistake).filter(Boolean) : [];
   if (!recent.length) return '';
@@ -957,7 +1022,9 @@ function removeListedSource(chatId, index) {
   else sources.set(chatId, store);
   activeQuizzes.delete(chatId);
   lastFlashcardSets.delete(chatId);
+  lastStudyGuides.delete(chatId);
   saveLastFlashcardSets();
+  saveLastStudyGuides();
   saveSources();
   return source;
 }
@@ -1150,6 +1217,14 @@ function studyGuideText(guide) {
   ].join('\n\n');
 }
 
+function formatStudyGuideExport(guide) {
+  return [
+    'ExamBuddy source-cited revision guide',
+    'Use this guide alongside the listed source citations when reviewing.',
+    studyGuideText(guide),
+  ].join('\n\n').trim() + '\n';
+}
+
 async function createQuiz(chatId, topic, sessionKey = chatId, sourceNumber = null, difficulty = 'standard') {
   const store = sources.get(sessionKey) || { pdfs: [], images: [] };
   const selected = selectStudySources(store, sourceNumber);
@@ -1269,6 +1344,8 @@ async function createStudyGuide(chatId, topic, sessionKey = chatId, sourceNumber
   } catch (err) {
     throw new Error(`Study guide creation failed safely: ${err.message}`);
   }
+  lastStudyGuides.set(sessionKey, guide);
+  saveLastStudyGuides();
   await sendLong(chatId, '📘 Study guide from your sources\n\n', studyGuideText(guide));
 }
 
@@ -1902,6 +1979,26 @@ async function handleUpdate(update) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
   }
+  if ((cmd === '/studyguide' || cmd === '/guide') && /^export$/i.test(args.trim())) {
+    const guide = lastStudyGuides.get(sessionKey);
+    if (!guide) return send(chatId, 'No generated study guide is available to export yet. Create a source-cited guide with <code>/studyguide</code> first.');
+    const privateRecipientId = isGroupChat(msg) ? groupMemberId(msg) : null;
+    if (isGroupChat(msg) && privateRecipientId === null) {
+      return send(chatId, 'I could not verify a member to receive this private study-guide export. Please try again from your private chat with me.');
+    }
+    try {
+      await sendDocument(privateRecipientId ?? chatId, formatStudyGuideExport(guide), 'exambuddy-study-guide.txt', 'Your latest ExamBuddy revision guide.');
+      if (privateRecipientId !== null) {
+        await send(chatId, 'Your latest revision guide was sent to you in a private chat.');
+      }
+    } catch (err) {
+      const detail = privateRecipientId !== null
+        ? 'I could not send that export privately. Start a private chat with me using /start, then retry /studyguide export here.'
+        : `Could not export study guide: ${escapeHtml(err.message)}`;
+      await send(chatId, `⚠️ ${detail}`).catch(() => {});
+    }
+    return;
+  }
   if (cmd === '/studyguide' || cmd === '/guide') {
     const scoped = parseSourceScopedTopic(args);
     if (scoped.topic.length > MAX_TEXT_QUESTION_CHARS) {
@@ -2021,10 +2118,12 @@ async function handleUpdate(update) {
     lastQuestions.delete(sessionKey);
     activeQuizzes.delete(sessionKey);
     lastFlashcardSets.delete(sessionKey);
+    lastStudyGuides.delete(sessionKey);
     quizPerformance.delete(sessionKey);
     quizMistakes.delete(sessionKey);
     saveSources();
     saveLastFlashcardSets();
+    saveLastStudyGuides();
     saveQuizPerformance();
     saveQuizMistakes();
     return send(chatId, 'All sources, conversation memory, active quiz state, flashcard exports, performance analytics, and missed-question review data in your ExamBuddy workspace have been cleared.');
@@ -2109,6 +2208,7 @@ async function main() {
   loadQuizPerformance();
   loadQuizMistakes();
   loadLastFlashcardSets();
+  loadLastStudyGuides();
   offset = loadUpdateOffset();
   startHealthServer();
   const me = await tg('getMe', {});
@@ -2120,6 +2220,8 @@ async function main() {
   console.log(`Source store: ${SOURCES_FILE}`);
   console.log(`Quiz analytics store: ${QUIZ_PERFORMANCE_FILE}`);
   console.log(`Quiz mistakes store: ${QUIZ_MISTAKES_FILE}`);
+  console.log(`Flashcard sets store: ${FLASHCARD_SETS_FILE}`);
+  console.log(`Study guides store: ${STUDY_GUIDES_FILE}`);
   console.log(`Telegram update checkpoint: ${UPDATE_OFFSET_FILE} (starting offset ${offset})`);
   setInterval(poll, 1500);
   poll();
@@ -2132,6 +2234,7 @@ function resetTestState() {
   lastQuestions.clear();
   activeQuizzes.clear();
   lastFlashcardSets.clear();
+  lastStudyGuides.clear();
   quizPerformance.clear();
   quizMistakes.clear();
   for (const { timer } of pendingClears.values()) clearTimeout(timer);
@@ -2151,6 +2254,7 @@ module.exports = {
     activeQuizzes,
     answerImages,
     lastFlashcardSets,
+    lastStudyGuides,
     healthReport,
     markPollFailure,
     markTelegramSuccess,
@@ -2161,13 +2265,17 @@ module.exports = {
     formatPerformanceAnalytics,
     formatQuizMistakes,
     loadLastFlashcardSets,
+    loadLastStudyGuides,
     loadQuizMistakes,
     normalizeQuizMistake,
     removeQuizMistake,
     clearQuizMistakes,
     saveLastFlashcardSets,
+    saveLastStudyGuides,
     saveQuizMistakes,
     serializeLastFlashcardSets,
+    serializeLastStudyGuides,
+    normalizeStoredStudyGuide,
     selectPracticeTopic,
     selectQuizDifficulty,
     loadQuizPerformance,

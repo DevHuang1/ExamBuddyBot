@@ -782,6 +782,30 @@ test('isolates each group participant’s sources and study state', async () => 
 });
 
 
+test('delivers a group participant’s latest revision guide only to their private chat', async () => {
+  const { telegramCalls } = installFetchMock({});
+  const aliceKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/studyguide export').message);
+  __test.lastStudyGuides.set(aliceKey, {
+    status: 'ok',
+    topic: 'Geometry',
+    overview: 'Triangles have interior angles.',
+    keyPoints: Array.from({ length: 5 }, (_, index) => ({ point: `Geometry point ${index + 1}.`, source: 'PDF 1, page 2' })),
+    examTips: ['Sketch the shape.', 'Label angles.', 'Check the total.'],
+    studyPlan: ['Review the theorem.', 'Solve examples.', 'Take a quiz.'],
+  });
+
+  await handleUpdate(groupMessage(GROUP_ALICE_ID, '/studyguide export'));
+
+  const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+  assert.ok(exportCall);
+  assert.equal(exportCall.body.get('chat_id'), String(GROUP_ALICE_ID));
+  assert.match(await exportCall.body.get('document').text(), /Study guide: Geometry/);
+  const groupConfirmation = telegramCalls
+    .filter((call) => call.url.includes('/sendMessage') && call.payload.chat_id === GROUP_CHAT_ID)
+    .at(-1);
+  assert.match(groupConfirmation.payload.text, /latest revision guide was sent to you in a private chat/i);
+});
+
 test('delivers a group participant’s latest flashcard export only to their private chat', async () => {
   const { telegramCalls } = installFetchMock({});
   const aliceKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/flashcards export').message);
@@ -948,6 +972,40 @@ test('generates a source-cited study guide from the requested numbered lecture s
   assert.match(output, /High-yield key points/);
   assert.match(output, /Source: PDF 2, page 1/);
   assert.match(output, /Three-step study plan/);
+  assert.equal(__test.lastStudyGuides.get(CHAT_ID).topic, 'Linear equations');
+});
+
+test('exports the latest validated revision guide as a reusable text document', async () => {
+  const { telegramCalls } = installFetchMock({});
+  __test.lastStudyGuides.set(CHAT_ID, {
+    status: 'ok',
+    topic: 'Algebra',
+    overview: 'Linear equations have degree one.',
+    keyPoints: Array.from({ length: 5 }, (_, index) => ({ point: `Key point ${index + 1}.`, source: 'PDF 1, page 1' })),
+    examTips: ['Read carefully.', 'Show working.', 'Check units.'],
+    studyPlan: ['Review notes.', 'Solve examples.', 'Attempt a quiz.'],
+  });
+
+  await handleUpdate(message('/studyguide export'));
+
+  const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+  assert.ok(exportCall);
+  assert.equal(exportCall.body.get('chat_id'), String(CHAT_ID));
+  assert.equal(exportCall.body.get('document').name, 'exambuddy-study-guide.txt');
+  const text = await exportCall.body.get('document').text();
+  assert.match(text, /ExamBuddy source-cited revision guide/);
+  assert.match(text, /Study guide: Algebra/);
+  assert.match(text, /Source: PDF 1, page 1/);
+  assert.match(text, /Three-step study plan/);
+});
+
+test('reports safely when no revision guide is available to export', async () => {
+  const { telegramCalls } = installFetchMock({});
+
+  await handleUpdate(message('/studyguide export'));
+
+  assert.equal(telegramCalls.filter((call) => call.url.includes('/sendDocument')).length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /No generated study guide is available to export yet/i);
 });
 
 test('responds safely to /studyguide when no readable lecture source is available', async () => {
@@ -1385,6 +1443,48 @@ test('ignores malformed persisted flashcard sets safely', () => {
     fs.writeFileSync(store, JSON.stringify({ [CHAT_ID]: { topic: 'Algebra', cards: [] } }));
     assert.equal(__test.loadLastFlashcardSets(store), 0);
     assert.equal(__test.lastFlashcardSets.has(CHAT_ID), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('persists latest revision guides across restarts and preserves workspace isolation', async () => {
+  const guide = (topic) => ({
+    status: 'ok',
+    topic,
+    overview: `${topic} overview.`,
+    keyPoints: Array.from({ length: 5 }, (_, index) => ({ point: `${topic} point ${index + 1}.`, source: 'PDF 1, page 1' })),
+    examTips: ['Read carefully.', 'Show working.', 'Review answers.'],
+    studyPlan: ['Review notes.', 'Practice examples.', 'Take a quiz.'],
+  });
+  const groupKey = __test.studySessionKey(groupMessage(GROUP_ALICE_ID, '/studyguide export').message);
+  __test.lastStudyGuides.set(CHAT_ID, guide('Algebra'));
+  __test.lastStudyGuides.set(groupKey, guide('Geometry'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy-study-guides-'));
+  const store = path.join(dir, 'study-guides.json');
+  try {
+    assert.equal(__test.saveLastStudyGuides(store), true);
+    __test.lastStudyGuides.clear();
+    assert.equal(__test.loadLastStudyGuides(store), 2);
+    assert.equal(__test.lastStudyGuides.get(CHAT_ID).topic, 'Algebra');
+    assert.equal(__test.lastStudyGuides.get(groupKey).topic, 'Geometry');
+    const { telegramCalls } = installFetchMock({});
+    await handleUpdate(message('/studyguide export'));
+    const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+    assert.ok(exportCall);
+    assert.match(await exportCall.body.get('document').text(), /Study guide: Algebra/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ignores malformed persisted study guides safely', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exambuddy-study-guides-invalid-'));
+  const store = path.join(dir, 'study-guides.json');
+  try {
+    fs.writeFileSync(store, JSON.stringify({ [CHAT_ID]: { status: 'ok', topic: 'Algebra', keyPoints: [] } }));
+    assert.equal(__test.loadLastStudyGuides(store), 0);
+    assert.equal(__test.lastStudyGuides.has(CHAT_ID), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
