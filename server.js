@@ -44,6 +44,8 @@ const MAX_SCANNED_PDF_PAGES = parseInt(process.env.MAX_SCANNED_PDF_PAGES || '15'
 const PDF_RENDER_DPI = parseInt(process.env.PDF_RENDER_DPI || '160', 10);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS || '60000', 10);
 const HEALTH_STALE_AFTER_MS = Math.max(1_000, parseInt(process.env.HEALTH_STALE_AFTER_MS || '90000', 10) || 90_000);
+const POLL_INTERVAL_MS = Math.max(250, parseInt(process.env.POLL_INTERVAL_MS || '1500', 10) || 1_500);
+const MAX_POLL_BACKOFF_MS = Math.max(POLL_INTERVAL_MS, parseInt(process.env.MAX_POLL_BACKOFF_MS || '30000', 10) || 30_000);
 const MODEL_REQUEST_WINDOW_SECONDS = Math.max(1, parseInt(process.env.MODEL_REQUEST_WINDOW_SECONDS || '60', 10) || 60);
 const MAX_MODEL_REQUESTS_PER_WINDOW = Math.max(1, parseInt(process.env.MAX_MODEL_REQUESTS_PER_WINDOW || '12', 10) || 12);
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -2175,13 +2177,38 @@ function enqueueUpdate(update) {
 
 let offset = 0;
 let polling = false;
+let pollFailureCount = 0;
+let nextPollAllowedAt = 0;
+
+function pollBackoffDelay(failureCount) {
+  const failures = Math.max(1, Number.isSafeInteger(failureCount) ? failureCount : 1);
+  const multiplier = 2 ** Math.min(failures - 1, 10);
+  return Math.min(MAX_POLL_BACKOFF_MS, POLL_INTERVAL_MS * multiplier);
+}
+
+function isPollDue(now = Date.now()) {
+  return now >= nextPollAllowedAt;
+}
+
+function registerPollFailure(now = Date.now()) {
+  pollFailureCount++;
+  nextPollAllowedAt = now + pollBackoffDelay(pollFailureCount);
+  markPollFailure(now);
+  return { failures: pollFailureCount, retryInMs: nextPollAllowedAt - now };
+}
+
+function clearPollBackoff() {
+  pollFailureCount = 0;
+  nextPollAllowedAt = 0;
+}
 
 async function poll() {
-  if (polling) return;
+  if (polling || !isPollDue()) return;
   polling = true;
   try {
     const updates = await tg('getUpdates', { offset, timeout: 30 });
     markTelegramSuccess();
+    clearPollBackoff();
     for (const update of updates) {
       const updateId = update?.update_id;
       if (!Number.isSafeInteger(updateId) || updateId < 0) {
@@ -2195,8 +2222,8 @@ async function poll() {
       enqueueUpdate(update).catch(() => {});
     }
   } catch (err) {
-    markPollFailure();
-    console.error('Poll error:', err.message);
+    const retry = registerPollFailure();
+    console.error(`Poll error: ${err.message}. Retrying in ${Math.ceil(retry.retryInMs / 1000)} second(s).`);
   } finally {
     polling = false;
   }
@@ -2223,7 +2250,7 @@ async function main() {
   console.log(`Flashcard sets store: ${FLASHCARD_SETS_FILE}`);
   console.log(`Study guides store: ${STUDY_GUIDES_FILE}`);
   console.log(`Telegram update checkpoint: ${UPDATE_OFFSET_FILE} (starting offset ${offset})`);
-  setInterval(poll, 1500);
+  setInterval(poll, POLL_INTERVAL_MS);
   poll();
 }
 
@@ -2241,6 +2268,7 @@ function resetTestState() {
   pendingClears.clear();
   chatQueues.clear();
   modelRequestBuckets.clear();
+  clearPollBackoff();
   runtimeHealth.started = false;
   runtimeHealth.lastTelegramSuccessAt = 0;
   runtimeHealth.lastPollFailureAt = 0;
@@ -2253,11 +2281,15 @@ module.exports = {
   __test: {
     activeQuizzes,
     answerImages,
+    clearPollBackoff,
+    isPollDue,
     lastFlashcardSets,
     lastStudyGuides,
     healthReport,
     markPollFailure,
     markTelegramSuccess,
+    pollBackoffDelay,
+    registerPollFailure,
     quizPerformance,
     quizMistakes,
     groupMemberId,

@@ -1489,3 +1489,28 @@ test('ignores malformed persisted study guides safely', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('uses capped exponential backoff for Telegram polling failures and resets after recovery', () => {
+  const base = 1_000_000;
+
+  assert.equal(__test.pollBackoffDelay(1), 1_500);
+  assert.equal(__test.pollBackoffDelay(2), 3_000);
+  assert.equal(__test.pollBackoffDelay(5), 24_000);
+  assert.equal(__test.pollBackoffDelay(6), 30_000);
+  assert.equal(__test.pollBackoffDelay(20), 30_000);
+  assert.equal(__test.isPollDue(base), true);
+
+  const first = __test.registerPollFailure(base);
+  assert.deepEqual(first, { failures: 1, retryInMs: 1_500 });
+  assert.equal(__test.isPollDue(base + 1_499), false);
+  assert.equal(__test.isPollDue(base + 1_500), true);
+  assert.equal(__test.healthReport(base + 1_500).status, 'starting');
+
+  const second = __test.registerPollFailure(base + 1_500);
+  assert.deepEqual(second, { failures: 2, retryInMs: 3_000 });
+  __test.markTelegramSuccess(base + 4_500);
+  __test.clearPollBackoff();
+  assert.equal(__test.isPollDue(base + 4_500), true);
+  assert.equal(__test.healthReport(base + 4_500).status, 'ok');
+});
