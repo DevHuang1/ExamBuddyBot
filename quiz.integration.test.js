@@ -1548,3 +1548,30 @@ test('uses capped exponential backoff for Telegram polling failures and resets a
   assert.equal(__test.isPollDue(base + 4_500), true);
   assert.equal(__test.healthReport(base + 4_500).status, 'ok');
 });
+
+
+test('exports the latest flashcards as an Anki-ready tab-separated file', async () => {
+  const { telegramCalls } = installFetchMock({});
+  __test.lastFlashcardSets.set(CHAT_ID, {
+    topic: 'Algebra',
+    cards: Array.from({ length: 5 }, (_, index) => ({
+      front: index === 0 ? 'What\tis\na linear equation?' : `Concept ${index + 1}?`,
+      back: index === 0 ? 'An equation\nwith degree one.' : `Answer ${index + 1}.`,
+      source: 'PDF 1, page 1',
+    })),
+  });
+
+  await handleUpdate(message('/flashcards anki'));
+
+  const exportCall = telegramCalls.find((call) => call.url.includes('/sendDocument'));
+  assert.ok(exportCall);
+  assert.equal(exportCall.body.get('chat_id'), String(CHAT_ID));
+  assert.equal(exportCall.body.get('document').name, 'exambuddy-flashcards-anki.tsv');
+  const text = await exportCall.body.get('document').text();
+  const lines = text.trim().split('\n');
+  assert.deepEqual(lines.slice(0, 4), ['#separator:Tab', '#html:false', '#notetype:Basic', '#deck:ExamBuddy']);
+  assert.equal(lines.length, 9);
+  assert.equal(lines[4].split('\t').length, 2);
+  assert.match(lines[4], /What is a linear equation\?\tAn equation with degree one\. Source: PDF 1, page 1/);
+  assert.match(lines[8], /Concept 5\?\tAnswer 5\. Source: PDF 1, page 1/);
+});

@@ -338,6 +338,7 @@ const HELP_TEXT =
   '/flashcards [topic] – create five source-grounded study cards\n' +
   '/flashcards source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/flashcards export – privately download your latest flashcards\n' +
+  '/flashcards anki – privately download Anki-ready flashcards\n' +
   '/studyguide [topic] – create a cited exam revision guide\n' +
   '/studyguide source &lt;number&gt; [topic] – use one listed PDF/PPTX source\n' +
   '/studyguide export – privately download your latest revision guide\n' +
@@ -1206,6 +1207,25 @@ function formatFlashcardExport(flashcards) {
   ].join('\n\n').trim() + '\n';
 }
 
+function ankiField(value) {
+  return String(value || '').replace(/[\t\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function formatAnkiFlashcardExport(flashcards) {
+  const cards = flashcards.cards.map((card) => {
+    const front = ankiField(card.front);
+    const back = `${ankiField(card.back)} Source: ${ankiField(card.source)}`;
+    return `${front}\t${back}`;
+  });
+  return [
+    '#separator:Tab',
+    '#html:false',
+    '#notetype:Basic',
+    '#deck:ExamBuddy',
+    ...cards,
+  ].join('\n').trim() + '\n';
+}
+
 function studyGuideText(guide) {
   const keyPoints = guide.keyPoints.map((item, index) =>
     `${index + 1}. ${item.point}\nSource: ${item.source}`).join('\n\n');
@@ -2003,7 +2023,8 @@ async function handleUpdate(update) {
       return send(chatId, `⚠️ ${escapeHtml(err.message)}`).catch(() => {});
     }
   }
-  if (cmd === '/flashcards' && /^export$/i.test(args.trim())) {
+  const flashcardExportMode = args.trim().toLowerCase();
+  if (cmd === '/flashcards' && (flashcardExportMode === 'export' || flashcardExportMode === 'anki')) {
     const flashcards = lastFlashcardSets.get(sessionKey);
     if (!flashcards) return send(chatId, 'No generated flashcards are available to export yet. Create a source-grounded set with <code>/flashcards</code> first.');
     const privateRecipientId = isGroupChat(msg) ? groupMemberId(msg) : null;
@@ -2011,7 +2032,13 @@ async function handleUpdate(update) {
       return send(chatId, 'I could not verify a member to receive this private flashcard export. Please try again from your private chat with me.');
     }
     try {
-      await sendDocument(privateRecipientId ?? chatId, formatFlashcardExport(flashcards), 'exambuddy-flashcards.txt', 'Your latest ExamBuddy flashcards.');
+      const ankiExport = flashcardExportMode === 'anki';
+      await sendDocument(
+        privateRecipientId ?? chatId,
+        ankiExport ? formatAnkiFlashcardExport(flashcards) : formatFlashcardExport(flashcards),
+        ankiExport ? 'exambuddy-flashcards-anki.tsv' : 'exambuddy-flashcards.txt',
+        ankiExport ? 'Your latest ExamBuddy flashcards in Anki-ready tab-separated format.' : 'Your latest ExamBuddy flashcards.',
+      );
       if (privateRecipientId !== null) {
         await send(chatId, 'Your latest flashcards were sent to you in a private chat.');
       }
@@ -2389,7 +2416,9 @@ module.exports = {
     findSourcePassages,
     sourceSearchChunks,
     formatSourceSearchResults,
+    ankiField,
     flashcardText,
+    formatAnkiFlashcardExport,
     formatFlashcardExport,
     studyGuideText,
     base64ByteLength,
