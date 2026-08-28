@@ -396,6 +396,40 @@ test('lists numbered sources and removes only the requested source', async () =>
   assert.match(telegramMessages(telegramCalls).at(-1), /Removed source 2: Diagram\.png/);
 });
 
+test('searches uploaded source passages locally without using a model request', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+  __test.sources.set(CHAT_ID, {
+    pdfs: [
+      { name: 'History.pdf', type: 'pdf', pages: 1, text: '[Page 1] The French Revolution began in 1789.' },
+      { name: 'Algebra slides.pptx', type: 'pptx', pages: 2, text: '[Slide 1] A linear equation has degree one.\n\n[Slide 2] Solve a linear equation by isolating the variable.' },
+    ],
+    images: [],
+  });
+
+  await handleUpdate(message('/find linear equation'));
+
+  assert.equal(groqCalls.length, 0);
+  const results = telegramMessages(telegramCalls).at(-1);
+  assert.match(results, /Source search: linear equation/i);
+  assert.match(results, /Slides 2: Algebra slides\.pptx — \[Slide 1\]/);
+  assert.match(results, /linear equation has degree one/i);
+
+  await handleUpdate(message('/search source 2 isolating variable'));
+  const scoped = telegramMessages(telegramCalls).at(-1);
+  assert.match(scoped, /Slides 2: Algebra slides\.pptx — \[Slide 2\]/);
+  assert.doesNotMatch(scoped, /History\.pdf/);
+});
+
+test('returns a clear local search result when source text has no matching terms', async () => {
+  const { telegramCalls, groqCalls } = installFetchMock({});
+  seedSource();
+
+  await handleUpdate(message('/find mitochondria'));
+
+  assert.equal(groqCalls.length, 0);
+  assert.match(telegramMessages(telegramCalls).at(-1), /No matching text was found/i);
+});
+
 test('keeps source-backed questions away from external search and treats sources as data', async () => {
   const telegramCalls = [];
   const groqCalls = [];

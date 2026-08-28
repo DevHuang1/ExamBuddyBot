@@ -5,7 +5,7 @@ Telegram bot that answers exam questions from forwarded images, uploaded sources
 ## Features
 
 - 📷 **Forward images or albums** (question papers, homework, notes) — pages are processed in order, with every readable question, option, formula, table, and circuit detected.
-- 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches. Each learner workspace has a configurable source-storage ceiling, `/sources` shows current usage, and identical re-uploads are recognized before they can duplicate the library.
+- 📄 **Send a PDF or PPTX** — text PDFs/PPTX files are saved as cited lecture sources; image-only PDFs automatically fall back to full-page vision detection in bounded batches. Each learner workspace has a configurable source-storage ceiling, `/sources` shows current usage, identical re-uploads are recognized before they can duplicate the library, and `/find` returns matching page or slide excerpts locally without consuming a model request.
 - ✍️ **Send a text question** — answered from your uploaded sources, or from the web (Firecrawl / Tavily / DuckDuckGo) only when no sources are present. Source-backed questions stay source-only and are not sent to a search engine.
 - 📝 **Source-grounded quizzes, flashcards, and revision guides** — use `/quiz [topic]` for validated multiple-choice practice, `/flashcards [topic]` for five cited study cards that remain privately downloadable with `/flashcards export` after restarts, and `/studyguide [topic]` for an exam-ready overview, cited key points, practical tips, and a three-step study plan that remains privately downloadable with `/studyguide export` after restarts.
 - 📈 **Private quiz analytics, calibrated practice, and mistake review** — accuracy, adaptive study-focus analytics, and up to ten recent missed source-grounded quiz questions persist across restarts until the learner confirms `/clear`; `/practice` targets the weakest recorded topic and calibrates foundational, standard, or challenge questions from topic-level performance, while `/mistakes` explains recent errors.
@@ -45,6 +45,8 @@ Each component produces one named output. Use identifiers such as `Ybus`, `Dbus`
 | `/start` | Start the bot |
 | `/help` | Show help message |
 | `/sources` | List uploaded sources with their stable removal numbers |
+| `/find <terms>` | Search readable PDF/PPTX source text locally and return ranked page or slide excerpts without consuming a model request |
+| `/find source <number> <terms>` | Search one numbered PDF/PPTX source while preserving its original source number in the result |
 | `/remove <number>` | Delete one source from the `/sources` list and reset any active quiz |
 | `/practice [topic]` | Create an adaptive source-grounded quiz from the learner’s weakest recorded topic, using foundational, standard, or challenge difficulty based on topic accuracy; an explicit topic is also supported |
 | `/practice source <number> [topic]` | Create adaptive or explicitly targeted practice from one numbered PDF/PPTX source |

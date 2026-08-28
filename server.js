@@ -330,6 +330,7 @@ const HELP_TEXT =
   '• <b>Group workspaces</b> – each participant keeps separate sources, history, quizzes, and analytics. Replies still appear in the group.\n\n' +
   'Commands:\n' +
   '/sources – list your uploaded sources\n' +
+  '/find [source &lt;number&gt;] &lt;terms&gt; – search source pages or slides\n' +
   '/remove &lt;number&gt; – delete one listed source\n' +
   '/practice [topic] – create an adaptive question, or target a topic\n' +
   '/quiz [topic] – create one practice question from your sources\n' +
@@ -1420,6 +1421,46 @@ function chunkLabel(s, num, chunk) {
   return `<source ${sourceNumber}> ${kind} "${s.name}"\n${chunk}\n</source ${sourceNumber}>`;
 }
 
+function sourceSearchChunks(text) {
+  const labeledSections = String(text || '').split(/(?=\[(?:Page|Slide)\s+\d+\])/i).filter((section) => section.trim());
+  const sections = labeledSections.length ? labeledSections : [String(text || '')];
+  return sections.flatMap((section) => chunkText(section));
+}
+
+function findSourcePassages(sourceList, query, maxResults = 3) {
+  const queryTerms = keywordMap(query);
+  if (!queryTerms.size) return { error: 'Please include a specific word or phrase to search for.' };
+  const candidates = [];
+  sourceList.forEach((source, sourceIndex) => {
+    sourceSearchChunks(source.text).forEach((chunk, chunkIndex) => {
+      const chunkTerms = keywordMap(chunk);
+      let score = 0;
+      for (const [term, weight] of queryTerms) {
+        if (chunkTerms.has(term)) score += weight * (2 + Math.min(chunkTerms.get(term), 3));
+      }
+      if (score > 0) candidates.push({ source, sourceIndex, chunk, chunkIndex, score });
+    });
+  });
+  const results = candidates
+    .sort((left, right) => right.score - left.score || left.sourceIndex - right.sourceIndex || left.chunkIndex - right.chunkIndex)
+    .slice(0, Math.max(1, Math.min(5, maxResults)));
+  return { results };
+}
+
+function formatSourceSearchResults(query, results) {
+  if (!results.length) {
+    return `No matching text was found for <b>${escapeHtml(query)}</b>. Try a more specific term or use <code>/sources</code> to review the library.`;
+  }
+  const entries = results.map((result, index) => {
+    const sourceNumber = Number.isSafeInteger(result.source.sourceNumber) ? result.source.sourceNumber : result.sourceIndex + 1;
+    const kind = result.source.type === 'pptx' ? 'Slides' : 'PDF';
+    const location = result.chunk.match(/\[(Page|Slide)\s+\d+\]/i)?.[0] || 'Source excerpt';
+    const excerpt = result.chunk.replace(/\s+/g, ' ').trim().slice(0, 700);
+    return `<b>${index + 1}. ${escapeHtml(kind)} ${sourceNumber}: ${escapeHtml(result.source.name)} — ${escapeHtml(location)}</b>\n${escapeHtml(excerpt)}`;
+  });
+  return `🔎 <b>Source search: ${escapeHtml(query)}</b>\n\n${entries.join('\n\n')}`;
+}
+
 async function buildContext(sources, question, maxChars) {
   const qkeys = keywordMap(question);
   const scored = [];
@@ -1915,6 +1956,18 @@ async function handleUpdate(update) {
     const store = sources.get(sessionKey) || { pdfs: [], images: [] };
     return send(chatId, sourceListText(store));
   }
+  if (cmd === '/find' || cmd === '/search') {
+    const scoped = parseSourceScopedTopic(args);
+    if (!scoped.topic) return send(chatId, 'Usage: <code>/find &lt;terms&gt;</code> or <code>/find source &lt;number&gt; &lt;terms&gt;</code>.');
+    if (scoped.topic.length > MAX_TEXT_QUESTION_CHARS) {
+      return send(chatId, `Please keep the search terms under ${MAX_TEXT_QUESTION_CHARS.toLocaleString()} characters.`);
+    }
+    const selected = selectStudySources(sources.get(sessionKey) || { pdfs: [], images: [] }, scoped.sourceNumber);
+    if (selected.error) return send(chatId, `🔎 ${selected.error}`);
+    const search = findSourcePassages(selected.sources, scoped.topic);
+    if (search.error) return send(chatId, `🔎 ${search.error}`);
+    return sendLong(chatId, '', formatSourceSearchResults(scoped.topic, search.results));
+  }
   if (cmd === '/remove') {
     const requested = Number.parseInt(args, 10);
     if (!Number.isInteger(requested) || requested < 1 || String(requested) !== args.trim()) {
@@ -2333,6 +2386,9 @@ module.exports = {
     splitMessageText,
     parseSourceScopedTopic,
     selectStudySources,
+    findSourcePassages,
+    sourceSearchChunks,
+    formatSourceSearchResults,
     flashcardText,
     formatFlashcardExport,
     studyGuideText,
